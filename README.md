@@ -15,7 +15,7 @@ The app listens on [http://127.0.0.1:47281](http://127.0.0.1:47281). The same pr
 
 ## Deploy on Vercel
 
-Vercel does not keep a SQLite file. The API runs as a serverless function and stores accounts, sessions, and ledgers in hosted Postgres or Turso.
+Vercel does not keep a SQLite file. The build writes the API as one JavaScript file, `api/[...path].js`, so the serverless function does not load TypeScript. Accounts, sessions, and ledgers are stored in hosted Postgres or Turso.
 
 In the Vercel project, open Storage and create a Postgres database. Vercel sets `POSTGRES_URL`. Redeploy. The live site uses that database.
 

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node scripts/bundle-api.mjs",
     "lint": "oxlint",
     "test": "vitest run",
     "preview": "vite preview"
@@ -26,6 +26,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
+    "esbuild": "^0.28.2",
     "oxlint": "^1.88.0",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.3",
