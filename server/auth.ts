@@ -1,7 +1,7 @@
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { nextId } from "../src/lib/ids.ts";
-import { db } from "./db.ts";
+import { dbGet, dbRun } from "./db.ts";
 
 export interface Account {
   id: string;
@@ -27,43 +27,47 @@ export function passwordMatches(password: string, stored: string): boolean {
   return timingSafeEqual(actual, expected);
 }
 
-export function createAccount(name: string, password: string): Account {
+export async function createAccount(name: string, password: string): Promise<Account> {
   const account = { id: nextId("acct"), name };
-  db().prepare("INSERT INTO accounts (id, name, password_hash, created_at) VALUES (?, ?, ?, ?)").run(account.id, name, hashPassword(password), Date.now());
+  await dbRun("INSERT INTO accounts (id, name, password_hash, created_at) VALUES (?, ?, ?, ?)", [account.id, name, hashPassword(password), Date.now()]);
   return account;
 }
 
-export function findAccountByName(name: string): (Account & { passwordHash: string }) | null {
-  const row = db().prepare("SELECT id, name, password_hash FROM accounts WHERE name = ?").get(name) as
-    | { id: string; name: string; password_hash: string }
-    | undefined;
-  if (!row) return null;
+export async function findAccountByName(name: string): Promise<(Account & { passwordHash: string }) | null> {
+  const row = await dbGet("SELECT id, name, password_hash FROM accounts WHERE name = ?", [name]);
+  if (!row || typeof row.id !== "string" || typeof row.name !== "string" || typeof row.password_hash !== "string") return null;
   return { id: row.id, name: row.name, passwordHash: row.password_hash };
 }
 
-export function findAccountById(id: string): Account | null {
-  const row = db().prepare("SELECT id, name FROM accounts WHERE id = ?").get(id) as { id: string; name: string } | undefined;
-  return row ?? null;
+export async function findAccountById(id: string): Promise<Account | null> {
+  const row = await dbGet("SELECT id, name FROM accounts WHERE id = ?", [id]);
+  if (!row || typeof row.id !== "string" || typeof row.name !== "string") return null;
+  return { id: row.id, name: row.name };
 }
 
-export function openSession(accountId: string): string {
+export async function openSession(accountId: string): Promise<string> {
   const token = randomBytes(32).toString("base64url");
-  db().prepare("INSERT INTO sessions (token, account_id, expires_at) VALUES (?, ?, ?)").run(token, accountId, Date.now() + SESSION_MS);
+  await dbRun("INSERT INTO sessions (token, account_id, expires_at) VALUES (?, ?, ?)", [token, accountId, Date.now() + SESSION_MS]);
   return token;
 }
 
-export function closeSession(token: string): void {
-  db().prepare("DELETE FROM sessions WHERE token = ?").run(token);
+export async function closeSession(token: string): Promise<void> {
+  await dbRun("DELETE FROM sessions WHERE token = ?", [token]);
 }
 
-export function accountForToken(token: string | null): Account | null {
+function asTime(value: unknown): number {
+  if (typeof value === "number") return value;
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "string" && value.trim() !== "") return Number(value);
+  return Number.NaN;
+}
+
+export async function accountForToken(token: string | null): Promise<Account | null> {
   if (!token) return null;
-  const row = db().prepare("SELECT account_id, expires_at FROM sessions WHERE token = ?").get(token) as
-    | { account_id: string; expires_at: number }
-    | undefined;
-  if (!row) return null;
-  if (row.expires_at <= Date.now()) {
-    closeSession(token);
+  const row = await dbGet("SELECT account_id, expires_at FROM sessions WHERE token = ?", [token]);
+  if (!row || typeof row.account_id !== "string") return null;
+  if (asTime(row.expires_at) <= Date.now()) {
+    await closeSession(token);
     return null;
   }
   return findAccountById(row.account_id);
@@ -79,12 +83,13 @@ export function readToken(req: IncomingMessage): string | null {
   return null;
 }
 
-export function accountFromRequest(req: IncomingMessage): Account | null {
+export function accountFromRequest(req: IncomingMessage): Promise<Account | null> {
   return accountForToken(readToken(req));
 }
 
-export function writeSessionCookie(res: ServerResponse, token: string | null): void {
+export function writeSessionCookie(res: ServerResponse, token: string | null, req?: IncomingMessage): void {
   const maxAge = token ? Math.floor(SESSION_MS / 1000) : 0;
   const value = token ? encodeURIComponent(token) : "";
-  res.setHeader("set-cookie", `${COOKIE}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`);
+  const secure = req?.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+  res.setHeader("set-cookie", `${COOKIE}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`);
 }

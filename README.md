@@ -11,7 +11,22 @@ npm install
 npm run dev
 ```
 
-The app listens on [http://127.0.0.1:47281](http://127.0.0.1:47281). The same process serves the interface and the API. Accounts and the ledger are stored in `data/otello.sqlite`.
+The app listens on [http://127.0.0.1:47281](http://127.0.0.1:47281). The same process serves the interface and the API. On this machine, accounts and the ledger are stored in `data/otello.sqlite`.
+
+## Deploy on Vercel
+
+Vercel does not keep a SQLite file. The API runs as a serverless function and stores accounts, sessions, and ledgers in hosted Postgres or Turso.
+
+In the Vercel project, open Storage and create a Postgres database. Vercel sets `POSTGRES_URL`. Redeploy. The live site uses that database.
+
+Turso works the same way. Set both of these environment variables, then redeploy:
+
+```bash
+TURSO_DATABASE_URL=libsql://your-database.turso.io
+TURSO_AUTH_TOKEN=your-token
+```
+
+If neither database is configured, the site says the ledger database is not configured instead of pretending a local file is durable.
 
 ```bash
 npm test
@@ -39,6 +54,7 @@ Open Examples in the footer to walk the same lifecycle against labeled sample re
 | `src/lib/policy.ts` | The single gate for an RPC batch |
 | `src/lib/reconcile.ts` | Activation, expiry, and exhaustion as time passes |
 | `src/lib/crypto.ts` | Canonical agreements, ECDSA sign and verify |
-| `server/` | Accounts, SQLite ledger, and the RPC forwarder |
+| `server/` | Accounts, the ledger, and the RPC forwarder |
+| `api/` | Vercel serverless entry for the same API |
 
 Uptime is not measured, so the product shows it as unavailable. Latency is the median of forwarded calls, and only after an endpoint has answered. Accrued amounts come from accepted usage. No payment rail is connected, so nothing is marked paid.

@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
+import { sendFailure } from "./fail.ts";
 import { handleApi } from "./http.ts";
 import { startMaintenance } from "./db.ts";
 
@@ -15,12 +16,7 @@ export function otelloApi(): Plugin {
         return;
       }
       void handleApi(req, res).catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : "The server could not complete that operation.";
-        if (!res.headersSent) {
-          res.statusCode = message === "too large" ? 413 : 500;
-          res.setHeader("content-type", "application/json; charset=utf-8");
-        }
-        res.end(JSON.stringify({ errors: [message === "too large" ? "That request is too large." : "The server could not complete that operation."] }));
+        sendFailure(res, error);
       });
     });
   };

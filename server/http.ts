@@ -28,7 +28,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   const path = url.pathname.replace(/\/$/, "") || "/";
   const method = req.method ?? "GET";
-  const account = accountFromRequest(req);
+  const account = await accountFromRequest(req);
 
   if (method === "POST" && path === "/api/register") return register(req, res);
   if (method === "POST" && path === "/api/login") return login(req, res);
@@ -44,25 +44,25 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
 
   const scope = scopeFrom(url);
   if (method === "GET" && path === "/api/workspace") {
-    await withLedger(() => {
-      const state = scope === "examples" ? readLedger("examples") : loadLedger("live");
+    await withLedger(async () => {
+      const state = scope === "examples" ? await readLedger("examples") : await loadLedger("live");
       send(res, 200, payload(account, scope, state));
     });
     return;
   }
   if (method === "POST" && path === "/api/examples/open") {
     await withLedger(async () => {
-      const existing = readLedger("examples");
+      const existing = await readLedger("examples");
       const state = existing ?? (await createSeedState(Date.now()));
-      if (!existing) writeLedger("examples", state);
-      send(res, 200, payload(account, "examples", loadLedger("examples")));
+      if (!existing) await writeLedger("examples", state);
+      send(res, 200, payload(account, "examples", await loadLedger("examples")));
     });
     return;
   }
   if (method === "POST" && path === "/api/examples/reset") {
     await withLedger(async () => {
       const state = await createSeedState(Date.now());
-      writeLedger("examples", state);
+      await writeLedger("examples", state);
       send(res, 200, payload(account, "examples", state));
     });
     return;
@@ -146,8 +146,8 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
     const leaseId = decodeURIComponent(leaseAction[1] ?? "");
     const action = leaseAction[2];
     if (method === "GET" && action === "credential") {
-      await withLedger(() => {
-        const state = loadLedger(scope);
+      await withLedger(async () => {
+        const state = await loadLedger(scope);
         const lease = state.leases.find((item) => item.id === leaseId);
         const agent = state.agents.find((item) => item.id === lease?.agentId);
         if (!lease?.credential || !agent) {
@@ -201,7 +201,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
   if (method === "POST" && path === "/api/rpc") {
     await withLedger(async () => {
       const now = Date.now();
-      const state = loadLedger(scope);
+      const state = await loadLedger(scope);
       const leaseId = stringField(record, "leaseId");
       const lease = state.leases.find((item) => item.id === leaseId);
       const agent = state.agents.find((item) => item.id === lease?.agentId);
@@ -233,7 +233,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
         now,
         scope === "examples" ? exampleExecutor : providerExecutor,
       );
-      writeLedger(scope, outcome.state);
+      await writeLedger(scope, outcome.state);
       send(res, 200, { ...publicResult(account, scope, outcome.state), result: outcome.result, errors: [] });
     });
     return;
@@ -254,9 +254,9 @@ async function mutate(
 ): Promise<void> {
   await withLedger(async () => {
     const now = Date.now();
-    const before = loadLedger(scope, now);
+    const before = await loadLedger(scope, now);
     const result = await task(before, now);
-    if (result.state !== before) writeLedger(scope, result.state);
+    if (result.state !== before) await writeLedger(scope, result.state);
     const issued = issuedSecret(before, result.state, account.id, scope);
     send(res, result.errors.length > 0 ? 400 : 200, {
       ...publicResult(account, scope, result.state),
@@ -310,13 +310,13 @@ async function register(req: IncomingMessage, res: ServerResponse): Promise<void
     send(res, 400, { errors: ["Use a password of at least 8 characters."] });
     return;
   }
-  if (findAccountByName(name)) {
+  if (await findAccountByName(name)) {
     send(res, 409, { errors: ["That name is already registered."] });
     return;
   }
   try {
-    const account = createAccount(name, password);
-    writeSessionCookie(res, openSession(account.id));
+    const account = await createAccount(name, password);
+    writeSessionCookie(res, await openSession(account.id), req);
     send(res, 200, { account });
   } catch {
     send(res, 409, { errors: ["That name is already registered."] });
@@ -327,19 +327,19 @@ async function login(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const record = asRecord(await readJson(req));
   const name = stringField(record, "name").trim();
   const password = stringField(record, "password");
-  const account = findAccountByName(name);
+  const account = await findAccountByName(name);
   if (!account || !passwordMatches(password, account.passwordHash)) {
     send(res, 401, { errors: ["That name and password do not match."] });
     return;
   }
-  writeSessionCookie(res, openSession(account.id));
+  writeSessionCookie(res, await openSession(account.id), req);
   send(res, 200, { account: { id: account.id, name: account.name } });
 }
 
-function logout(req: IncomingMessage, res: ServerResponse): void {
+async function logout(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const token = readToken(req);
-  if (token) closeSession(token);
-  writeSessionCookie(res, null);
+  if (token) await closeSession(token);
+  writeSessionCookie(res, null, req);
   send(res, 200, { account: null });
 }
 
@@ -394,6 +394,13 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
+  const prepared = (req as IncomingMessage & { body?: unknown }).body;
+  if (typeof prepared === "string") {
+    if (prepared.length > 65_536) throw new Error("too large");
+    return prepared.length === 0 ? {} : (JSON.parse(prepared) as unknown);
+  }
+  if (prepared && typeof prepared === "object") return prepared;
+  if (req.method === "GET" || req.headers["content-length"] === "0") return {};
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {

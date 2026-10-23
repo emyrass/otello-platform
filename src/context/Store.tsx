@@ -85,7 +85,13 @@ export function OtelloProvider({ children }: { children: ReactNode }) {
         ...init?.headers,
       },
     });
-    const envelope = (await response.json()) as Envelope;
+    const text = await response.text();
+    let envelope: Envelope;
+    try {
+      envelope = text ? (JSON.parse(text) as Envelope) : {};
+    } catch {
+      throw new Error("The ledger is not available from this deployment.");
+    }
     if (response.status === 401) {
       setAccount(null);
       setState(null);
@@ -117,6 +123,11 @@ export function OtelloProvider({ children }: { children: ReactNode }) {
         setScopeState(initialScope);
         const session = await request("/api/session");
         if (cancel) return;
+        if (session.status >= 500) {
+          setError(session.errors?.[0] ?? "The ledger could not be opened.");
+          setReady(true);
+          return;
+        }
         if (session.account) {
           setAccount(session.account);
           if (initialScope === "examples") {
