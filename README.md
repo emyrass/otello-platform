@@ -15,7 +15,7 @@ The app listens on [http://127.0.0.1:47281](http://127.0.0.1:47281). The same pr
 
 ## Deploy on Vercel
 
-Vercel does not keep a SQLite file. The build writes the API as one JavaScript file, `api/[...path].js`, so the serverless function does not load TypeScript. Accounts, sessions, and ledgers are stored in Turso or hosted Postgres.
+Vercel does not keep a SQLite file. The build writes the API as one JavaScript file, `api/index.js`. Vercel does not treat a bracket catch-all as an API route for this app, so every `/api/...` request is rewritten to that function and the original path is restored before the ledger runs. Accounts, sessions, and ledgers are stored in Turso or hosted Postgres.
 
 Set both Turso variables, then redeploy. When both are present, the ledger uses Turso even if a Postgres URL is also set. The URL may be `libsql://` or `https://`.
 
