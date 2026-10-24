@@ -2888,6 +2888,15 @@ var COLLAPSED = /* @__PURE__ */ new Set(["/api", "/api/index", "/api/index.js"])
 function resolveApiUrl(rawUrl, headers = {}, query = {}) {
   const url = new URL(rawUrl || "/", "http://127.0.0.1");
   const pathname = url.pathname.replace(/\/+$/, "") || "/";
+  if (pathname.includes("[id]")) {
+    const idParam = url.searchParams.get("id") ?? single(query.id);
+    if (idParam && isSafeSuffix(idParam)) {
+      const replaced = pathname.replaceAll("[id]", idParam);
+      url.searchParams.delete("id");
+      const search2 = url.searchParams.toString();
+      return `${replaced}${search2 ? `?${search2}` : ""}`;
+    }
+  }
   if (pathname.startsWith("/api/") && !COLLAPSED.has(pathname)) return `${url.pathname}${url.search}`;
   const forwarded = forwardedApiUrl(headers);
   if (forwarded) return forwarded;
@@ -2902,6 +2911,9 @@ function list(value) {
   if (Array.isArray(value)) return value.map(String);
   if (typeof value === "string" && value) return [value];
   return [];
+}
+function single(value) {
+  return list(value)[0];
 }
 function forwardedApiUrl(headers) {
   for (const name of ["x-forwarded-uri", "x-original-uri", "x-vercel-original-url", "x-invoke-path"]) {

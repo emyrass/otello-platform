@@ -8,6 +8,7 @@ describe("vercel api routing", () => {
     expect(resolveApiUrl("/api/index?path=leases/lse_1/approve")).toBe("/api/leases/lse_1/approve");
     expect(resolveApiUrl("/api", { "x-forwarded-uri": "/api/session" })).toBe("/api/session");
     expect(resolveApiUrl("/api?scope=live", {}, { path: ["leases", "lse_1", "approve"] })).toBe("/api/leases/lse_1/approve?scope=live");
+    expect(resolveApiUrl("/api/leases/[id]/approve?id=lse_1")).toBe("/api/leases/lse_1/approve");
     expect(resolveApiUrl("/api?path=../secret")).toBe("/api?path=../secret");
   });
 

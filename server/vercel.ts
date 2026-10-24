@@ -15,6 +15,15 @@ type HeaderMap = Record<string, HeaderValue>;
 export function resolveApiUrl(rawUrl: string, headers: HeaderMap = {}, query: Record<string, HeaderValue> = {}): string {
   const url = new URL(rawUrl || "/", "http://127.0.0.1");
   const pathname = url.pathname.replace(/\/+$/, "") || "/";
+  if (pathname.includes("[id]")) {
+    const idParam = url.searchParams.get("id") ?? single(query.id);
+    if (idParam && isSafeSuffix(idParam)) {
+      const replaced = pathname.replaceAll("[id]", idParam);
+      url.searchParams.delete("id");
+      const search = url.searchParams.toString();
+      return `${replaced}${search ? `?${search}` : ""}`;
+    }
+  }
   if (pathname.startsWith("/api/") && !COLLAPSED.has(pathname)) return `${url.pathname}${url.search}`;
 
   const forwarded = forwardedApiUrl(headers);
@@ -32,6 +41,10 @@ function list(value: HeaderValue): string[] {
   if (Array.isArray(value)) return value.map(String);
   if (typeof value === "string" && value) return [value];
   return [];
+}
+
+function single(value: HeaderValue): string | undefined {
+  return list(value)[0];
 }
 
 function forwardedApiUrl(headers: HeaderMap): string | null {

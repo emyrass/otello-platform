@@ -6,7 +6,10 @@
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ],
   "functions": {
-    "api/index.js": {
+    "api/*.js": {
+      "maxDuration": 30
+    },
+    "api/**/*.js": {
       "maxDuration": 30
     }
   }

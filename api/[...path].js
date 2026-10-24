@@ -2884,17 +2884,63 @@ var config = {
   runtime: "nodejs",
   maxDuration: 30
 };
-function normalizeRequestUrl(req) {
-  const raw = req.url ?? "/";
-  if (raw.startsWith("/api")) return;
-  const query = raw.includes("?") ? raw.slice(raw.indexOf("?")) : "";
-  const pathParam = req.query?.path;
-  const segments = Array.isArray(pathParam) ? pathParam : pathParam ? [pathParam] : [];
-  if (segments.length === 0) return;
-  req.url = `/api/${segments.map((part) => encodeURIComponent(part)).join("/")}${query}`;
+var COLLAPSED = /* @__PURE__ */ new Set(["/api", "/api/index", "/api/index.js"]);
+function resolveApiUrl(rawUrl, headers = {}, query = {}) {
+  const url = new URL(rawUrl || "/", "http://127.0.0.1");
+  const pathname = url.pathname.replace(/\/+$/, "") || "/";
+  if (pathname.includes("[id]")) {
+    const idParam = url.searchParams.get("id") ?? single(query.id);
+    if (idParam && isSafeSuffix(idParam)) {
+      const replaced = pathname.replaceAll("[id]", idParam);
+      url.searchParams.delete("id");
+      const search2 = url.searchParams.toString();
+      return `${replaced}${search2 ? `?${search2}` : ""}`;
+    }
+  }
+  if (pathname.startsWith("/api/") && !COLLAPSED.has(pathname)) return `${url.pathname}${url.search}`;
+  const forwarded = forwardedApiUrl(headers);
+  if (forwarded) return forwarded;
+  const fromUrl = url.searchParams.getAll("path");
+  const suffix = (fromUrl.length > 0 ? fromUrl : list(query.path)).map((part) => part.replace(/^\/+/, "")).filter(Boolean).join("/");
+  if (!isSafeSuffix(suffix)) return `${url.pathname}${url.search}`;
+  url.searchParams.delete("path");
+  const search = url.searchParams.toString();
+  return `/api/${suffix}${search ? `?${search}` : ""}`;
+}
+function list(value) {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value === "string" && value) return [value];
+  return [];
+}
+function single(value) {
+  return list(value)[0];
+}
+function forwardedApiUrl(headers) {
+  for (const name of ["x-forwarded-uri", "x-original-uri", "x-vercel-original-url", "x-invoke-path"]) {
+    const value = headers[name];
+    const text = (Array.isArray(value) ? value[0] : value)?.trim();
+    if (!text) continue;
+    let candidate = text;
+    if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+      try {
+        const parsed = new URL(candidate);
+        candidate = `${parsed.pathname}${parsed.search}`;
+      } catch {
+        continue;
+      }
+    }
+    if (!candidate.startsWith("/")) candidate = `/${candidate}`;
+    const pathOnly = candidate.split("?")[0]?.replace(/\/+$/, "") ?? "";
+    if (pathOnly.startsWith("/api/") && !COLLAPSED.has(pathOnly) && !pathOnly.includes("..")) return candidate;
+  }
+  return null;
+}
+function isSafeSuffix(suffix) {
+  if (!suffix || suffix.includes("..") || suffix.includes("\\") || suffix.includes("://")) return false;
+  return /^[\w./~:@%+-]+$/.test(suffix);
 }
 async function handler(req, res) {
-  normalizeRequestUrl(req);
+  req.url = resolveApiUrl(req.url ?? "/", req.headers, req.query ?? {});
   try {
     await handleApi(req, res);
   } catch (error) {
@@ -2903,5 +2949,6 @@ async function handler(req, res) {
 }
 export {
   config,
-  handler as default
+  handler as default,
+  resolveApiUrl
 };
