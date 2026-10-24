@@ -475,6 +475,7 @@ function denyRpc(
 function replayNote(execution: UsageEvent["execution"]): string {
   if (execution === "provider") return "Replayed a recorded acceptance. The endpoint was not called again.";
   if (execution === "example") return "Replayed an example acceptance. Nothing was sent.";
+  if (execution === "simulated") return "Replayed a recorded simulation. Nothing was sent again.";
   return "Replayed a recorded result. Nothing was sent again.";
 }
 

@@ -51,6 +51,11 @@ export function ResourceDetailPage() {
               Request lease
             </Link>
           )}
+          {resource.endpointConfigured ? null : (
+            <p className="mt-6 max-w-sm text-sm leading-relaxed text-char">
+              No endpoint is saved. An accepted batch is simulated on this server, labeled as simulated, and metered from the signed price. It is not sent to a provider.
+            </p>
+          )}
         </div>
         <dl className="grid content-start gap-y-3 text-sm sm:grid-cols-[10rem_1fr]">
           <Spec k="Kind" v="RPC endpoint" />

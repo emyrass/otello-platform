@@ -20,7 +20,7 @@ import {
   updateResource,
 } from "./engine.ts";
 import { toPublicState } from "./publicState.ts";
-import { exampleExecutor } from "./rpc.ts";
+import { exampleExecutor, simulatedExecutor } from "./rpc.ts";
 import { sha256Hex } from "./hash.ts";
 import { costForRequests, formatUsd, parseUsdToMicro } from "./money.ts";
 import { createSeedState } from "./seed.ts";
@@ -443,7 +443,46 @@ describe("lease lifecycle", () => {
     expect(result.state.audit.some((event) => event.type === "rpc.accepted")).toBe(true);
   });
 
-  it("refuses a live call with no endpoint and does not charge it", async () => {
+  it("simulates a workspace call with no endpoint and meters the signed price", async () => {
+    const opened = await activeLease({ maxRequests: 10_000, spendingCapMicro: costForRequests(10_000, 200_000) });
+    const result = await submitRpcEngine(
+      opened.state,
+      {
+        leaseId: opened.leaseId,
+        agentId: "agt_test",
+        method: "eth_blockNumber",
+        requestCount: 2_500,
+        credentialSecret: opened.secret,
+        idempotencyKey: "sim-1",
+      },
+      NOW + 1_000,
+      simulatedExecutor,
+    );
+    expect(result.result.ok).toBe(true);
+    expect(result.result.costMicro).toBe(500_000);
+    expect(result.result.response?.execution).toBe("simulated");
+    expect(result.result.response?.note).toContain("Not sent");
+    expect(result.state.leases[0]!.usage).toEqual({ requests: 2_500, costMicro: 500_000 });
+    expect(result.state.audit.some((event) => event.type === "rpc.accepted" && event.details.execution === "simulated")).toBe(true);
+    const replay = await submitRpcEngine(
+      result.state,
+      {
+        leaseId: opened.leaseId,
+        agentId: "agt_test",
+        method: "eth_blockNumber",
+        requestCount: 2_500,
+        credentialSecret: opened.secret,
+        idempotencyKey: "sim-1",
+      },
+      NOW + 2_000,
+      simulatedExecutor,
+    );
+    expect(replay.result.replayed).toBe(true);
+    expect(replay.result.response?.note).toContain("Nothing was sent again");
+    expect(replay.state.leases[0]!.usage.requests).toBe(2_500);
+  });
+
+  it("refuses a call when the executor is unavailable and does not charge it", async () => {
     const opened = await activeLease();
     const before = opened.state.leases[0]!.usage;
     const result = await submitRpcEngine(

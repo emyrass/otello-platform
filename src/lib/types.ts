@@ -176,7 +176,7 @@ export interface UsageEvent {
   reason?: string;
   idempotencyKey?: string;
   /** How the batch was handled. Absent on older denied rows that never reached an endpoint. */
-  execution?: "provider" | "example" | "unavailable";
+  execution?: RpcExecutionKind;
   /** Round-trip time recorded for a forwarded batch. Absent when nothing was sent. */
   latencyMs?: number;
 }
@@ -274,8 +274,10 @@ export interface RpcInput {
   params?: unknown;
 }
 
+export type RpcExecutionKind = "provider" | "example" | "unavailable" | "simulated";
+
 export interface RpcResponseBody {
-  execution: "provider" | "example" | "unavailable";
+  execution: RpcExecutionKind;
   requestCount: number;
   latencyMs?: number;
   body?: unknown;
@@ -314,7 +316,7 @@ export const REVOCATION_CONDITIONS = [
   "The provider may revoke the lease, with a recorded reason, if capacity is withdrawn.",
   "Access is refused while the agent or the provider is disabled. Accrued usage stays on the books.",
   "Otello refuses further use when the lease expires, the request allowance is exhausted, or the spending cap is reached.",
-  "The server checks the lease before a request is forwarded. An offer with no endpoint is not called.",
+  "The server checks the lease before a request is forwarded. An offer with no endpoint is simulated locally and is not called.",
 ] as const;
 
 export const RATE_WINDOW_MS = 60_000;
@@ -324,7 +326,7 @@ export const MAX_BATCH = 100_000;
 export const MIN_DURATION_MS = 15_000;
 
 export const WORKSPACE_NOTICE =
-  "This workspace is stored on the Otello server. A request is forwarded only when that resource has an endpoint. Amounts are accrued from accepted usage. No payment rail is connected, so nothing here has been paid.";
+  "This workspace is stored on the Otello server. A request is forwarded only when that resource has an endpoint. Otherwise an accepted batch is simulated here and labeled as simulated. Amounts are accrued from accepted usage. No payment rail is connected, so nothing here has been paid.";
 
 export const EXAMPLE_NOTICE =
   "These are example records, kept apart from the workspace. Calls in this view are metered here and are not sent to a network.";

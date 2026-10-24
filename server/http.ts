@@ -20,7 +20,7 @@ import { exampleExecutor } from "../src/lib/rpc.ts";
 import type { AppState, LeaseRequestInput, ResourceDraft, RpcMethod } from "../src/lib/types.ts";
 import { accountFromRequest, closeSession, createAccount, findAccountByName, openSession, passwordMatches, readToken, writeSessionCookie, type Account } from "./auth.ts";
 import { loadLedger, readLedger, withLedger, writeLedger, type Scope } from "./db.ts";
-import { providerExecutor } from "./forward.ts";
+import { workspaceExecutor } from "./forward.ts";
 
 const METHODS = ["eth_blockNumber", "eth_getBalance", "eth_getBlockByNumber", "eth_call", "eth_getTransactionReceipt"] as const;
 
@@ -231,7 +231,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
           ...(record.params !== undefined ? { params: record.params } : {}),
         },
         now,
-        scope === "examples" ? exampleExecutor : providerExecutor,
+        scope === "examples" ? exampleExecutor : workspaceExecutor,
       );
       await writeLedger(scope, outcome.state);
       send(res, 200, { ...publicResult(account, scope, outcome.state), result: outcome.result, errors: [] });

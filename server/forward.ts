@@ -1,6 +1,12 @@
-import { unavailableExecutor, type RpcExecution, type RpcExecutor } from "../src/lib/rpc.ts";
+import { simulatedExecutor, unavailableExecutor, type RpcExecution, type RpcExecutor } from "../src/lib/rpc.ts";
 
 export const FORWARD_LIMIT = 50;
+
+/** Live workspace. Forwards when an endpoint is saved. Otherwise runs a labeled local simulation. */
+export const workspaceExecutor: RpcExecutor = async (context) => {
+  if (!context.endpointUrl) return simulatedExecutor(context);
+  return providerExecutor(context);
+};
 
 export const providerExecutor: RpcExecutor = async (context) => {
   if (!context.endpointUrl) return unavailableExecutor(context);

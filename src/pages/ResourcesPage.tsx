@@ -40,7 +40,7 @@ export function ResourcesPage() {
         lede={
           scope === "examples"
             ? "Example offers, kept apart from the workspace. None of them has an endpoint."
-            : "Offers published in this workspace. A price is what the provider set. Latency is shown only after a connected endpoint answers."
+            : "Offers published in this workspace. A price is what the provider set. Without an endpoint, accepted calls are simulated here. Latency is shown only after a connected endpoint answers."
         }
       />
       <div className="mt-10 flex flex-col gap-4 border-y border-ink/10 py-5">

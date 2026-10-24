@@ -85,7 +85,7 @@ var REVOCATION_CONDITIONS = [
   "The provider may revoke the lease, with a recorded reason, if capacity is withdrawn.",
   "Access is refused while the agent or the provider is disabled. Accrued usage stays on the books.",
   "Otello refuses further use when the lease expires, the request allowance is exhausted, or the spending cap is reached.",
-  "The server checks the lease before a request is forwarded. An offer with no endpoint is not called."
+  "The server checks the lease before a request is forwarded. An offer with no endpoint is simulated locally and is not called."
 ];
 var RATE_WINDOW_MS = 6e4;
 var GENESIS_HASH = "genesis";
@@ -519,17 +519,23 @@ var unavailableExecutor = async () => ({
   execution: "unavailable",
   reason: "RPC execution is unavailable. This resource has no endpoint configured, so the request was not sent."
 });
-var exampleExecutor = async (context) => {
+var exampleExecutor = async (context) => ({
+  ok: true,
+  execution: "example",
+  body: localSample(context),
+  note: `Example ${context.network} sample for chain id ${CHAIN_IDS[context.network]}. Not sent to a network. ${context.requestCount.toLocaleString("en-US")} requests were evaluated as one batch.`
+});
+var simulatedExecutor = async (context) => ({
+  ok: true,
+  execution: "simulated",
+  body: localSample(context),
+  note: `Simulated ${context.network} response. Not sent to a provider or a network. ${context.requestCount.toLocaleString("en-US")} requests are priced from the signed agreement.`
+});
+function localSample(context) {
   const block = 21e6 + Math.floor(context.now / 12e3);
   const sampleCount = Math.min(3, Math.max(0, context.requestCount));
-  const sample = Array.from({ length: sampleCount }, (_, index) => sampleFor(context.method, block, index));
-  return {
-    ok: true,
-    execution: "example",
-    body: sample,
-    note: `Example ${context.network} sample for chain id ${CHAIN_IDS[context.network]}. Not sent to a network. ${context.requestCount.toLocaleString("en-US")} requests were evaluated as one batch.`
-  };
-};
+  return Array.from({ length: sampleCount }, (_, index) => sampleFor(context.method, block, index));
+}
 function sampleFor(method, block, index) {
   const number = `0x${(block + index).toString(16)}`;
   switch (method) {
@@ -897,6 +903,7 @@ function denyRpc(state, input, reason, now, execution, latencyMs) {
 function replayNote(execution) {
   if (execution === "provider") return "Replayed a recorded acceptance. The endpoint was not called again.";
   if (execution === "example") return "Replayed an example acceptance. Nothing was sent.";
+  if (execution === "simulated") return "Replayed a recorded simulation. Nothing was sent again.";
   return "Replayed a recorded result. Nothing was sent again.";
 }
 async function submitRpc(state, input, now, executor = unavailableExecutor) {
@@ -1919,6 +1926,10 @@ function writeSessionCookie(res, token, req) {
 
 // server/forward.ts
 var FORWARD_LIMIT = 50;
+var workspaceExecutor = async (context) => {
+  if (!context.endpointUrl) return simulatedExecutor(context);
+  return providerExecutor(context);
+};
 var providerExecutor = async (context) => {
   if (!context.endpointUrl) return unavailableExecutor(context);
   if (!Number.isInteger(context.requestCount) || context.requestCount < 1) {
@@ -2203,7 +2214,7 @@ async function handleApi(req, res) {
           ...record.params !== void 0 ? { params: record.params } : {}
         },
         now,
-        scope === "examples" ? exampleExecutor : providerExecutor
+        scope === "examples" ? exampleExecutor : workspaceExecutor
       );
       await writeLedger(scope, outcome.state);
       send2(res, 200, { ...publicResult(account, scope, outcome.state), result: outcome.result, errors: [] });

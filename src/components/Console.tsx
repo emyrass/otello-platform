@@ -84,7 +84,7 @@ export function Console({ initialAgentId, initialLeaseId }: { initialAgentId?: s
           ? "Example view. A submission is metered here and is not sent to a network."
           : selected && state.resources.find((resource) => resource.id === selected.resourceId)?.endpointConfigured
             ? "This resource has an endpoint. An accepted batch is forwarded, then metered."
-            : "This resource has no endpoint. A submission is checked, then refused. It is not sent."}
+            : "This resource has no endpoint. An accepted batch is simulated on this server and metered. It is not sent to a provider."}
       </p>
       <p className="mt-2 text-xs text-char">
         {selected?.credential
@@ -133,6 +133,7 @@ export function Console({ initialAgentId, initialLeaseId }: { initialAgentId?: s
             <p className="text-sm">
               Accepted {result.requestCount.toLocaleString("en-US")} · {formatUsd(result.costMicro)}
               {result.response?.execution === "example" ? " · example, not sent" : ""}
+              {result.response?.execution === "simulated" ? " · simulated, not sent" : ""}
               {result.response?.execution === "provider" ? " · forwarded" : ""}
               {result.replayed ? " · replayed, no extra charge" : ""}
             </p>

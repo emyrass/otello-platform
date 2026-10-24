@@ -38,9 +38,9 @@ npm run preview
 
 1. Create an account.
 2. Register a provider and an agent. They belong to that account.
-3. Publish an RPC offer. Add an endpoint URL if calls should be forwarded. Without one, the server refuses the call and does not send it.
+3. Publish an RPC offer. Add an endpoint URL if calls should be forwarded. Without one, an accepted batch is simulated on the server, labeled as simulated, and is not sent.
 4. Request a lease, then approve it from the provider portal. The signature reads Verified only after the check passes.
-5. Submit a batch from the usage console. Accepted calls that were forwarded are metered in integer micro-USD. At $0.20 per 1,000 requests, 2,500 accepted requests cost $0.50.
+5. Submit a batch from the usage console. Accepted calls, including simulated ones, are metered in integer micro-USD. At $0.20 per 1,000 requests, 2,500 accepted requests cost $0.50. A forwarded call is labeled separately from a simulation.
 6. A refused batch, including one the endpoint rejects, does not change the allowance or the accrued amount.
 7. Revoke a lease or let it expire. Later calls are denied.
 

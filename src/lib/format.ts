@@ -1,5 +1,5 @@
 import { formatPerThousand, formatUsd } from "./money.ts";
-import type { AuditType, Availability, LeaseStatus, Network } from "./types.ts";
+import type { AuditType, Availability, LeaseStatus, Network, RpcExecutionKind } from "./types.ts";
 
 export function formatNumber(value: number): string {
   return value.toLocaleString("en-US");
@@ -110,6 +110,13 @@ const AUDIT_LABELS: Record<AuditType, string> = {
 
 export function auditLabel(type: AuditType): string {
   return AUDIT_LABELS[type];
+}
+
+export function acceptedOutcome(execution: RpcExecutionKind | undefined): string {
+  if (execution === "simulated") return "Accepted, simulated";
+  if (execution === "example") return "Accepted, example";
+  if (execution === "provider") return "Accepted, forwarded";
+  return "Accepted";
 }
 
 export function humanizeKey(key: string): string {

@@ -4,7 +4,7 @@ import { Console } from "../components/Console.tsx";
 import { PageHeader, SectionTitle, SelectInput, useTitle } from "../components/ui.tsx";
 import { UsageChart } from "../components/UsageChart.tsx";
 import { useLedger } from "../context/Store.tsx";
-import { formatNumber, formatTimestamp, formatUsd } from "../lib/format.ts";
+import { acceptedOutcome, formatNumber, formatTimestamp, formatUsd } from "../lib/format.ts";
 import { leaseAccepted, nameOf, usageSeries } from "../lib/selectors.ts";
 
 export function UsagePage() {
@@ -95,7 +95,7 @@ export function UsagePage() {
                   <td className="py-3 pr-3 tabular-nums">{formatNumber(event.requestCount)}</td>
                   <td className="py-3 pr-3 tabular-nums">{formatUsd(event.unitPriceMicroPerThousand)}</td>
                   <td className="py-3 pr-3 tabular-nums">{formatUsd(event.costMicro)}</td>
-                  <td className="py-3">{event.outcome === "accepted" ? "Accepted" : event.reason}</td>
+                  <td className="py-3">{event.outcome === "accepted" ? acceptedOutcome(event.execution) : event.reason}</td>
                 </tr>
               ))}
             </tbody>

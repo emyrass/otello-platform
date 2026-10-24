@@ -1,4 +1,4 @@
-import type { LedgerOrigin, Network, RpcMethod } from "./types.ts";
+import type { LedgerOrigin, Network, RpcExecutionKind, RpcMethod } from "./types.ts";
 
 const CHAIN_IDS: Record<Network, number> = {
   ethereum: 1,
@@ -19,7 +19,7 @@ export interface RpcExecutionContext {
 
 export interface RpcExecution {
   ok: boolean;
-  execution: "provider" | "example" | "unavailable";
+  execution: RpcExecutionKind;
   reason?: string;
   latencyMs?: number;
   body?: unknown;
@@ -35,17 +35,26 @@ export const unavailableExecutor: RpcExecutor = async () => ({
 });
 
 /** Example ledger only. Produces a labeled sample and does not open a network connection. */
-export const exampleExecutor: RpcExecutor = async (context) => {
+export const exampleExecutor: RpcExecutor = async (context) => ({
+  ok: true,
+  execution: "example",
+  body: localSample(context),
+  note: `Example ${context.network} sample for chain id ${CHAIN_IDS[context.network]}. Not sent to a network. ${context.requestCount.toLocaleString("en-US")} requests were evaluated as one batch.`,
+});
+
+/** Workspace offers with no endpoint. A labeled local sample, priced by the agreement, never a network call. */
+export const simulatedExecutor: RpcExecutor = async (context) => ({
+  ok: true,
+  execution: "simulated",
+  body: localSample(context),
+  note: `Simulated ${context.network} response. Not sent to a provider or a network. ${context.requestCount.toLocaleString("en-US")} requests are priced from the signed agreement.`,
+});
+
+function localSample(context: RpcExecutionContext): unknown[] {
   const block = 21_000_000 + Math.floor(context.now / 12_000);
   const sampleCount = Math.min(3, Math.max(0, context.requestCount));
-  const sample = Array.from({ length: sampleCount }, (_, index) => sampleFor(context.method, block, index));
-  return {
-    ok: true,
-    execution: "example",
-    body: sample,
-    note: `Example ${context.network} sample for chain id ${CHAIN_IDS[context.network]}. Not sent to a network. ${context.requestCount.toLocaleString("en-US")} requests were evaluated as one batch.`,
-  };
-};
+  return Array.from({ length: sampleCount }, (_, index) => sampleFor(context.method, block, index));
+}
 
 function sampleFor(method: RpcMethod, block: number, index: number): unknown {
   const number = `0x${(block + index).toString(16)}`;

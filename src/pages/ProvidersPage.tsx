@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { LeaseTable } from "../components/LeaseTable.tsx";
 import { Button, ErrorList, Field, NumberInput, PageHeader, Pill, SectionTitle, SelectInput, TextArea, TextInput, useTitle } from "../components/ui.tsx";
 import { useLedger } from "../context/Store.tsx";
-import { formatNumber, formatUsd, networkLabel } from "../lib/format.ts";
+import { acceptedOutcome, formatNumber, formatUsd, networkLabel } from "../lib/format.ts";
 import { formatUsdInput, parseUsdToMicro } from "../lib/money.ts";
 import { providerRevenueMicro } from "../lib/selectors.ts";
 import { NETWORKS, RPC_METHODS, type Availability, type Network, type Resource, type ResourceDraft, type RpcMethod } from "../lib/types.ts";
@@ -226,7 +226,7 @@ export function ProviderPortalPage() {
                   <td className="py-3 pr-4">{event.method}</td>
                   <td className="py-3 pr-4 tabular-nums">{formatNumber(event.requestCount)}</td>
                   <td className="py-3 pr-4 tabular-nums">{formatUsd(event.costMicro)}</td>
-                  <td className="py-3">{event.outcome === "accepted" ? "Accepted" : event.reason}</td>
+                  <td className="py-3">{event.outcome === "accepted" ? acceptedOutcome(event.execution) : event.reason}</td>
                 </tr>
               ))}
             </tbody>
@@ -432,7 +432,7 @@ function OfferDraft({
         <NumberInput value={draft.capacityRequests} onChange={(event) => setDraft({ ...draft, capacityRequests: Number(event.target.value) })} />
       </Field>
       <div className="md:col-span-2">
-        <Field label="RPC endpoint" hint={keepEndpoint ? "Leave blank to keep the current endpoint. The URL is not shown again." : "Optional. Without one, calls are refused and not sent."}>
+        <Field label="RPC endpoint" hint={keepEndpoint ? "Leave blank to keep the current endpoint. The URL is not shown again." : "Optional. Without one, an accepted batch is simulated here and metered. It is not sent."}>
           <TextInput value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://" autoComplete="off" />
         </Field>
         {keepEndpoint ? (
