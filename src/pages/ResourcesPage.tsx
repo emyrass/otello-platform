@@ -42,7 +42,7 @@ export function ResourcesPage() {
         lede={
           scope === "examples"
             ? "Example offers, kept apart from the workspace. None of them has an endpoint."
-            : "Sample offers are marked Sample. Each one lists a provider, a price, a rate limit, and availability. Offers you publish appear in the same list."
+            : "Sample offers are marked Sample. Each one lists a provider, a price, a rate limit, and availability. An open sample can be requested, and the lease stays pending until it is approved."
         }
       />
       <div className="mt-10 flex flex-col gap-4 border-y border-ink/10 py-5">

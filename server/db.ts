@@ -4,6 +4,7 @@ import path from "node:path";
 import { createClient, type Client, type InValue, type Transaction } from "@libsql/client";
 import postgres, { type Sql, type TransactionSql } from "postgres";
 import { emptyState, reconcile } from "../src/lib/engine.ts";
+import { ensureSampleMarket } from "../src/lib/marketSamples.ts";
 import type { AppState } from "../src/lib/types.ts";
 
 export type Scope = "live" | "examples";
@@ -208,7 +209,8 @@ export async function writeLedger(scope: Scope, state: AppState): Promise<void> 
 
 export async function loadLedger(scope: Scope, now = Date.now()): Promise<AppState> {
   const stored = (await readLedger(scope)) ?? emptyState(now);
-  const next = reconcile(stored, now);
+  const seeded = scope === "live" ? await ensureSampleMarket(stored) : stored;
+  const next = reconcile(seeded, now);
   if (next !== stored || !(await readLedger(scope))) await writeLedger(scope, next);
   return next;
 }

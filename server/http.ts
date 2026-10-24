@@ -167,7 +167,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
         const lease = state.leases.find((item) => item.id === leaseId);
         const provider = state.providers.find((item) => item.id === lease?.providerId);
         if (!lease || !provider) return { state, errors: ["No lease matches that identifier."] };
-        if (!canAct(scope, account.id, provider.ownerId)) return { state, errors: ["Only the provider can approve this request."] };
+        if (!canDecideLease(scope, account.id, provider.ownerId)) return { state, errors: ["Only the provider can approve this request."] };
         return approveLease(state, leaseId, provider.id, now);
       });
       return;
@@ -177,7 +177,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
         const lease = state.leases.find((item) => item.id === leaseId);
         const provider = state.providers.find((item) => item.id === lease?.providerId);
         if (!lease || !provider) return { state, errors: ["No lease matches that identifier."] };
-        if (!canAct(scope, account.id, provider.ownerId)) return { state, errors: ["Only the provider can reject this request."] };
+        if (!canDecideLease(scope, account.id, provider.ownerId)) return { state, errors: ["Only the provider can reject this request."] };
         return rejectLease(state, leaseId, provider.id, stringField(record, "reason"), now);
       });
       return;
@@ -187,7 +187,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
         const lease = state.leases.find((item) => item.id === leaseId);
         const provider = state.providers.find((item) => item.id === lease?.providerId);
         if (!lease || !provider) return { state, errors: ["No lease matches that identifier."] };
-        if (!canAct(scope, account.id, provider.ownerId)) return { state, errors: ["Only the provider can revoke this lease."] };
+        if (!canDecideLease(scope, account.id, provider.ownerId)) return { state, errors: ["Only the provider can revoke this lease."] };
         return revokeLease(state, leaseId, stringField(record, "reason"), now);
       });
       return;
@@ -244,6 +244,10 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
 
 function canAct(scope: Scope, accountId: string, ownerId: string): boolean {
   return scope === "examples" || accountId === ownerId;
+}
+
+function canDecideLease(scope: Scope, accountId: string, ownerId: string): boolean {
+  return canAct(scope, accountId, ownerId) || ownerId === "sample";
 }
 
 async function mutate(

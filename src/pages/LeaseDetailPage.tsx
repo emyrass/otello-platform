@@ -7,6 +7,7 @@ import { CredentialPanel } from "../components/CredentialPanel.tsx";
 import { Button, ErrorList, FeaturePanel, Field, Meter, SectionTitle, StatusMark, TextArea, useTitle } from "../components/ui.tsx";
 import { useLedger } from "../context/Store.tsx";
 import { formatNumber, formatPerThousand, formatRemaining, formatTimestamp, formatUsd, networkLabel, statusLabel } from "../lib/format.ts";
+import { isSampleProvider } from "../lib/marketSamples.ts";
 import { leaseAccepted, nameOf } from "../lib/selectors.ts";
 
 export function LeaseDetailPage() {
@@ -21,7 +22,7 @@ export function LeaseDetailPage() {
   const [busy, setBusy] = useState(false);
   if (!lease) return <p className="text-sm">That lease is not in the ledger.</p>;
   const provider = state.providers.find((item) => item.id === lease.providerId);
-  const canManage = scope === "examples" || provider?.ownerId === account.id;
+  const canManage = scope === "examples" || provider?.ownerId === account.id || isSampleProvider(provider?.id);
 
   const totals = leaseAccepted(state, lease.id);
   const settlement = state.settlements.find((item) => item.leaseId === lease.id);

@@ -87,6 +87,7 @@ export function ProviderPortalPage() {
   const [issuedSecret, setIssuedSecret] = useState<string | null>(null);
   if (!provider) return <p className="text-sm">That provider is not registered.</p>;
   const canManage = scope === "examples" || provider.ownerId === account.id;
+  const canDecide = canManage || sampleDesk;
 
   const offers = state.resources.filter((resource) => resource.providerId === provider.id);
   const incoming = state.leases.filter((lease) => lease.providerId === provider.id && lease.status === "requested");
@@ -115,7 +116,7 @@ export function ProviderPortalPage() {
           </Button>
         ) : (
           <p className="text-sm text-char">
-            {sampleDesk ? "Sample desk. These offers are listed on the market and are not registered to an account." : "This desk is operated by another account."}
+            {sampleDesk ? "Sample desk. A request on these offers stays pending until it is approved." : "This desk is operated by another account."}
           </p>
         )}
       </div>
@@ -168,13 +169,13 @@ export function ProviderPortalPage() {
         {issuedSecret ? (
           <p className="mt-4 break-all border-l border-ink/20 pl-3 font-mono text-sm">Credential issued. Copy it now: {issuedSecret}</p>
         ) : null}
-        {!canManage && incoming.length > 0 ? <p className="mt-4 text-sm text-char">Only the provider account can approve or reject these requests.</p> : null}
+        {!canDecide && incoming.length > 0 ? <p className="mt-4 text-sm text-char">Only the provider account can approve or reject these requests.</p> : null}
         <div className="space-y-8">
           {incoming.map((lease) => (
             <Incoming
               key={lease.id}
               leaseId={lease.id}
-              canManage={canManage}
+              canManage={canDecide}
               onApprove={() =>
                 void approveLease(lease.id, provider.id).then((result) => {
                   setNotice(result.errors);
@@ -190,7 +191,7 @@ export function ProviderPortalPage() {
       <section className="mt-14">
         <SectionTitle title="Leases" />
         <LeaseTable leases={leases} empty="This provider has no leases." />
-        {canManage ? (
+        {canDecide ? (
           <div className="mt-6 space-y-4">
             {leases
               .filter((lease) => lease.status === "active" || lease.status === "approved")

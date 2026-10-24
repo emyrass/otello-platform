@@ -1,3 +1,5 @@
+import { generateSigningKey } from "./crypto.ts";
+import { addProvider } from "./engine.ts";
 import type { AppState, Provider, Resource, RpcMethod } from "./types.ts";
 import { RPC_METHODS } from "./types.ts";
 
@@ -144,7 +146,7 @@ export function isSampleProvider(id: string | undefined): boolean {
   return SAMPLE_PROVIDERS.some((provider) => provider.id === id);
 }
 
-/** Adds the sample market to a live workspace. Example ledgers already carry their own records. */
+/** Adds the sample market to a live workspace view. Example ledgers already carry their own records. */
 export function withMarketSamples(state: AppState): AppState {
   if (state.origin === "example") return state;
   const providers = [...state.providers];
@@ -156,4 +158,41 @@ export function withMarketSamples(state: AppState): AppState {
     if (!resources.some((item) => item.id === resource.id)) resources.push(resource);
   }
   return { ...state, providers, resources };
+}
+
+/** Persists sample desks and offers, with signing keys, so a request can be approved. */
+export async function ensureSampleMarket(state: AppState): Promise<AppState> {
+  if (state.origin === "example") return state;
+  let next = state;
+  for (const provider of SAMPLE_PROVIDERS) {
+    const saved = next.providers.some((item) => item.id === provider.id);
+    const keyed = Boolean(next.keystore[provider.id]);
+    if (saved && keyed) continue;
+    const keys = await generateSigningKey();
+    if (saved) {
+      next = {
+        ...next,
+        providers: next.providers.map((item) => (item.id === provider.id ? { ...item, publicKeyJwk: keys.publicJwk } : item)),
+        keystore: { ...next.keystore, [provider.id]: keys.privateJwk },
+      };
+      continue;
+    }
+    next = await addProvider(
+      next,
+      {
+        id: provider.id,
+        name: provider.name,
+        desk: provider.desk,
+        status: provider.status,
+        ownerId: provider.ownerId,
+        createdAt: provider.createdAt,
+      },
+      keys.privateJwk,
+      keys.publicJwk,
+    );
+  }
+  const known = new Set(next.resources.map((resource) => resource.id));
+  const missing = SAMPLE_RESOURCES.filter((resource) => !known.has(resource.id));
+  if (missing.length > 0) next = { ...next, resources: [...next.resources, ...missing] };
+  return next === state ? state : next;
 }

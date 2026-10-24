@@ -1229,6 +1229,161 @@ async function registerProvider(state, name, desk, now, ownerId) {
   return ok(next, { providerId: id });
 }
 
+// src/lib/marketSamples.ts
+var METHODS = [...RPC_METHODS];
+var SAMPLE_KEY = { kty: "EC", crv: "P-256" };
+var LISTED_AT = 17e11;
+var SAMPLE_PROVIDERS = [
+  {
+    id: "sample_prv_northline",
+    name: "Northline Relay",
+    desk: "Sample desk. Public reads from Frankfurt and Ashburn.",
+    status: "active",
+    ownerId: "sample",
+    publicKeyJwk: SAMPLE_KEY,
+    createdAt: LISTED_AT
+  },
+  {
+    id: "sample_prv_harbor",
+    name: "Harbor RPC",
+    desk: "Sample desk. Routes for Arbitrum and Polygon.",
+    status: "active",
+    ownerId: "sample",
+    publicKeyJwk: SAMPLE_KEY,
+    createdAt: LISTED_AT
+  },
+  {
+    id: "sample_prv_sable",
+    name: "Sable Index",
+    desk: "Sample desk. Withdrawn while the feed is down.",
+    status: "active",
+    ownerId: "sample",
+    publicKeyJwk: SAMPLE_KEY,
+    createdAt: LISTED_AT
+  }
+];
+function offer(input) {
+  return {
+    id: input.id,
+    name: input.name,
+    providerId: input.providerId,
+    kind: "rpc",
+    network: input.network,
+    summary: input.summary,
+    availability: input.availability,
+    region: input.region,
+    pricing: { model: "per_thousand_requests", pricePerThousandMicro: input.pricePerThousandMicro },
+    requestRateLimit: input.requestRateLimit,
+    maxLeaseDurationMs: input.maxLeaseHours * 60 * 60 * 1e3,
+    supportedMethods: METHODS,
+    capacityRequests: input.capacityRequests,
+    endpointConfigured: false
+  };
+}
+var SAMPLE_RESOURCES = [
+  offer({
+    id: "sample_res_northline_eth",
+    name: "Northline Ethereum",
+    providerId: "sample_prv_northline",
+    network: "ethereum",
+    summary: "Sample mainnet HTTP reads. Twenty cents per thousand accepted calls.",
+    availability: "available",
+    region: "Frankfurt",
+    pricePerThousandMicro: 2e5,
+    requestRateLimit: 600,
+    maxLeaseHours: 24,
+    capacityRequests: 5e6
+  }),
+  offer({
+    id: "sample_res_northline_base",
+    name: "Northline Base",
+    providerId: "sample_prv_northline",
+    network: "base",
+    summary: "Sample Base HTTP, listed for block and balance polling.",
+    availability: "available",
+    region: "Ashburn",
+    pricePerThousandMicro: 12e4,
+    requestRateLimit: 800,
+    maxLeaseHours: 12,
+    capacityRequests: 4e6
+  }),
+  offer({
+    id: "sample_res_harbor_arb",
+    name: "Harbor Arbitrum",
+    providerId: "sample_prv_harbor",
+    network: "arbitrum",
+    summary: "Sample Arbitrum reads. Spare capacity is limited.",
+    availability: "limited",
+    region: "Lisbon",
+    pricePerThousandMicro: 15e4,
+    requestRateLimit: 400,
+    maxLeaseHours: 6,
+    capacityRequests: 15e5
+  }),
+  offer({
+    id: "sample_res_harbor_pol",
+    name: "Harbor Polygon",
+    providerId: "sample_prv_harbor",
+    network: "polygon",
+    summary: "Sample Polygon HTTP for inexpensive inventory polling.",
+    availability: "available",
+    region: "Amsterdam",
+    pricePerThousandMicro: 8e4,
+    requestRateLimit: 900,
+    maxLeaseHours: 24,
+    capacityRequests: 6e6
+  }),
+  offer({
+    id: "sample_res_sable_pol",
+    name: "Sable Polygon Trace",
+    providerId: "sample_prv_sable",
+    network: "polygon",
+    summary: "Sample Polygon feed. Listed as unavailable.",
+    availability: "unavailable",
+    region: "Paris",
+    pricePerThousandMicro: 25e4,
+    requestRateLimit: 200,
+    maxLeaseHours: 8,
+    capacityRequests: 25e4
+  })
+];
+var SAMPLE_RESOURCE_IDS = new Set(SAMPLE_RESOURCES.map((resource) => resource.id));
+async function ensureSampleMarket(state) {
+  if (state.origin === "example") return state;
+  let next = state;
+  for (const provider of SAMPLE_PROVIDERS) {
+    const saved = next.providers.some((item) => item.id === provider.id);
+    const keyed = Boolean(next.keystore[provider.id]);
+    if (saved && keyed) continue;
+    const keys = await generateSigningKey();
+    if (saved) {
+      next = {
+        ...next,
+        providers: next.providers.map((item) => item.id === provider.id ? { ...item, publicKeyJwk: keys.publicJwk } : item),
+        keystore: { ...next.keystore, [provider.id]: keys.privateJwk }
+      };
+      continue;
+    }
+    next = await addProvider(
+      next,
+      {
+        id: provider.id,
+        name: provider.name,
+        desk: provider.desk,
+        status: provider.status,
+        ownerId: provider.ownerId,
+        createdAt: provider.createdAt
+      },
+      keys.privateJwk,
+      keys.publicJwk
+    );
+  }
+  const known = new Set(next.resources.map((resource) => resource.id));
+  const missing = SAMPLE_RESOURCES.filter((resource) => !known.has(resource.id));
+  if (missing.length > 0) next = { ...next, resources: [...next.resources, ...missing] };
+  return next === state ? state : next;
+}
+
 // server/db.ts
 var DatabaseConfigError = class extends Error {
   constructor() {
@@ -1399,7 +1554,8 @@ async function writeLedger(scope, state) {
 }
 async function loadLedger(scope, now = Date.now()) {
   const stored = await readLedger(scope) ?? emptyState(now);
-  const next = reconcile(stored, now);
+  const seeded = scope === "live" ? await ensureSampleMarket(stored) : stored;
+  const next = reconcile(seeded, now);
   if (next !== stored || !await readLedger(scope)) await writeLedger(scope, next);
   return next;
 }
@@ -1473,7 +1629,7 @@ async function send(state, leaseId, agentId, method, requestCount, now, label) {
   if (!result.result.ok) throw new Error(`${label}: ${result.result.reason ?? "denied"}`);
   return result.state;
 }
-function offer(input) {
+function offer2(input) {
   return {
     id: input.id,
     name: input.name,
@@ -1514,7 +1670,7 @@ async function createSeedState(now) {
     { id: "agt_cinder", name: "Cinder Route", mandate: "Polygon inventory and transfer receipts.", status: "active", ownerId: "example", createdAt: now - 14 * hour }
   ];
   const resources = [
-    offer({
+    offer2({
       id: "res_northline_eth",
       name: "Northline Ethereum",
       providerId: "prv_northline",
@@ -1528,7 +1684,7 @@ async function createSeedState(now) {
       supportedMethods: ALL_METHODS,
       capacityRequests: 5e6
     }),
-    offer({
+    offer2({
       id: "res_northline_base",
       name: "Northline Base",
       providerId: "prv_northline",
@@ -1542,7 +1698,7 @@ async function createSeedState(now) {
       supportedMethods: ALL_METHODS,
       capacityRequests: 4e6
     }),
-    offer({
+    offer2({
       id: "res_harbor_arb",
       name: "Harbor Arbitrum",
       providerId: "prv_harbor",
@@ -1556,7 +1712,7 @@ async function createSeedState(now) {
       supportedMethods: ALL_METHODS,
       capacityRequests: 15e5
     }),
-    offer({
+    offer2({
       id: "res_harbor_pol",
       name: "Harbor Polygon",
       providerId: "prv_harbor",
@@ -1570,7 +1726,7 @@ async function createSeedState(now) {
       supportedMethods: ALL_METHODS,
       capacityRequests: 6e6
     }),
-    offer({
+    offer2({
       id: "res_kiln_eth",
       name: "Kiln Archive",
       providerId: "prv_kiln",
@@ -1584,7 +1740,7 @@ async function createSeedState(now) {
       supportedMethods: ALL_METHODS,
       capacityRequests: 4e5
     }),
-    offer({
+    offer2({
       id: "res_sable_pol",
       name: "Sable Polygon Trace",
       providerId: "prv_sable",
@@ -1598,7 +1754,7 @@ async function createSeedState(now) {
       supportedMethods: ALL_METHODS,
       capacityRequests: 25e4
     }),
-    offer({
+    offer2({
       id: "res_marlowe_base",
       name: "Marlowe Base",
       providerId: "prv_marlowe",
@@ -1612,7 +1768,7 @@ async function createSeedState(now) {
       supportedMethods: READ_METHODS,
       capacityRequests: 8e5
     }),
-    offer({
+    offer2({
       id: "res_kiln_arb",
       name: "Kiln Arbitrum Light",
       providerId: "prv_kiln",
@@ -2015,7 +2171,7 @@ function rpcErrorMessage(row) {
 }
 
 // server/http.ts
-var METHODS = ["eth_blockNumber", "eth_getBalance", "eth_getBlockByNumber", "eth_call", "eth_getTransactionReceipt"];
+var METHODS2 = ["eth_blockNumber", "eth_getBalance", "eth_getBlockByNumber", "eth_call", "eth_getTransactionReceipt"];
 async function handleApi(req, res) {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   const path2 = url.pathname.replace(/\/$/, "") || "/";
@@ -2151,7 +2307,7 @@ async function handleApi(req, res) {
         const lease = state.leases.find((item) => item.id === leaseId);
         const provider = state.providers.find((item) => item.id === lease?.providerId);
         if (!lease || !provider) return { state, errors: ["No lease matches that identifier."] };
-        if (!canAct(scope, account.id, provider.ownerId)) return { state, errors: ["Only the provider can approve this request."] };
+        if (!canDecideLease(scope, account.id, provider.ownerId)) return { state, errors: ["Only the provider can approve this request."] };
         return approveLease(state, leaseId, provider.id, now);
       });
       return;
@@ -2161,7 +2317,7 @@ async function handleApi(req, res) {
         const lease = state.leases.find((item) => item.id === leaseId);
         const provider = state.providers.find((item) => item.id === lease?.providerId);
         if (!lease || !provider) return { state, errors: ["No lease matches that identifier."] };
-        if (!canAct(scope, account.id, provider.ownerId)) return { state, errors: ["Only the provider can reject this request."] };
+        if (!canDecideLease(scope, account.id, provider.ownerId)) return { state, errors: ["Only the provider can reject this request."] };
         return rejectLease(state, leaseId, provider.id, stringField(record, "reason"), now);
       });
       return;
@@ -2171,7 +2327,7 @@ async function handleApi(req, res) {
         const lease = state.leases.find((item) => item.id === leaseId);
         const provider = state.providers.find((item) => item.id === lease?.providerId);
         if (!lease || !provider) return { state, errors: ["No lease matches that identifier."] };
-        if (!canAct(scope, account.id, provider.ownerId)) return { state, errors: ["Only the provider can revoke this lease."] };
+        if (!canDecideLease(scope, account.id, provider.ownerId)) return { state, errors: ["Only the provider can revoke this lease."] };
         return revokeLease(state, leaseId, stringField(record, "reason"), now);
       });
       return;
@@ -2197,7 +2353,7 @@ async function handleApi(req, res) {
         credentialSecret2 = lease.credential.secret;
       }
       const methodName = stringField(record, "method");
-      if (!METHODS.includes(methodName)) {
+      if (!METHODS2.includes(methodName)) {
         send2(res, 400, { ...publicResult(account, scope, state), errors: ["Choose a supported RPC method."] });
         return;
       }
@@ -2225,6 +2381,9 @@ async function handleApi(req, res) {
 }
 function canAct(scope, accountId, ownerId) {
   return scope === "examples" || accountId === ownerId;
+}
+function canDecideLease(scope, accountId, ownerId) {
+  return canAct(scope, accountId, ownerId) || ownerId === "sample";
 }
 async function mutate(res, account, scope, task) {
   await withLedger(async () => {
@@ -2311,7 +2470,7 @@ async function logout(req, res) {
   send2(res, 200, { account: null });
 }
 function draftFrom(record) {
-  const methods = Array.isArray(record.supportedMethods) ? record.supportedMethods.filter((item) => METHODS.includes(item)) : [];
+  const methods = Array.isArray(record.supportedMethods) ? record.supportedMethods.filter((item) => METHODS2.includes(item)) : [];
   const draft = {
     name: stringField(record, "name"),
     summary: stringField(record, "summary"),
@@ -2330,7 +2489,7 @@ function draftFrom(record) {
   return draft;
 }
 function leaseInput(record) {
-  const methods = Array.isArray(record.permittedMethods) ? record.permittedMethods.filter((item) => METHODS.includes(item)) : [];
+  const methods = Array.isArray(record.permittedMethods) ? record.permittedMethods.filter((item) => METHODS2.includes(item)) : [];
   return {
     agentId: stringField(record, "agentId"),
     resourceId: stringField(record, "resourceId"),

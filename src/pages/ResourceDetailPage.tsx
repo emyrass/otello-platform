@@ -50,18 +50,19 @@ export function ResourceDetailPage() {
           <p className="mt-6 max-w-sm text-sm leading-relaxed text-char">
             At this price, 2,500 accepted requests would cost {formatUsd(illustration)}. That is a price illustration, not usage recorded for this offer.
           </p>
-          {sample ? (
-            <p className="mt-6 max-w-sm text-sm leading-relaxed text-char">
-              Sample offer. The provider, price, rate limit, and availability above are listed for the market. It is not registered to an account, so it cannot be leased.
-            </p>
-          ) : closed ? (
+          {closed ? (
             <p className="mt-6 text-sm">This offer cannot be requested while it is withdrawn or the provider is disabled.</p>
           ) : (
             <Link to={`/leases/new?resource=${resource.id}`} className="mt-6 inline-flex rounded-full bg-ink px-4 py-2 text-[13px] tracking-wide text-ivory">
               Request lease
             </Link>
           )}
-          {sample || resource.endpointConfigured ? null : (
+          {sample && !closed ? (
+            <p className="mt-6 max-w-sm text-sm leading-relaxed text-char">
+              Sample offer. A request is recorded as pending and can be approved.
+            </p>
+          ) : null}
+          {resource.endpointConfigured ? null : (
             <p className="mt-6 max-w-sm text-sm leading-relaxed text-char">
               No endpoint is saved. An accepted batch is simulated on this server, labeled as simulated, and metered from the signed price. It is not sent to a provider.
             </p>

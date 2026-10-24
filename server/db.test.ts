@@ -31,7 +31,8 @@ describe("ledger database", () => {
     const now = Date.UTC(2026, 9, 23);
     const created = await loadLedger("live", now);
     expect(created.origin).toBe("record");
-    expect(created.resources).toEqual([]);
+    expect(created.resources.some((resource) => resource.id === "sample_res_northline_eth")).toBe(true);
+    expect(created.keystore.sample_prv_northline).toBeTruthy();
     const stored = emptyState(now);
     stored.agents.push({
       id: "agt_test",
