@@ -2887,25 +2887,33 @@ var config = {
 var COLLAPSED = /* @__PURE__ */ new Set(["/api", "/api/index", "/api/index.js"]);
 function resolveApiUrl(rawUrl, headers = {}, query = {}) {
   const url = new URL(rawUrl || "/", "http://127.0.0.1");
-  const pathname = url.pathname.replace(/\/+$/, "") || "/";
-  if (pathname.includes("[id]")) {
-    const idParam = url.searchParams.get("id") ?? single(query.id);
-    if (idParam && isSafeSuffix(idParam)) {
-      const replaced = pathname.replaceAll("[id]", idParam);
-      url.searchParams.delete("id");
-      const search2 = url.searchParams.toString();
-      return `${replaced}${search2 ? `?${search2}` : ""}`;
-    }
+  let pathname = url.pathname.replace(/\/+$/, "") || "/";
+  for (const key of ["id", "route", "action"]) {
+    const token = `[${key}]`;
+    if (!pathname.includes(token)) continue;
+    const value = url.searchParams.get(key) ?? single(query[key]);
+    if (!value || !isSafeSuffix(value)) return applyScope(`${url.pathname}${url.search}`, headers);
+    pathname = pathname.replaceAll(token, value);
+    url.searchParams.delete(key);
   }
-  if (pathname.startsWith("/api/") && !COLLAPSED.has(pathname)) return `${url.pathname}${url.search}`;
+  const currentSearch = url.searchParams.toString();
+  const current2 = `${pathname}${currentSearch ? `?${currentSearch}` : ""}`;
+  if (pathname.startsWith("/api/") && !COLLAPSED.has(pathname)) return applyScope(current2, headers);
   const forwarded = forwardedApiUrl(headers);
-  if (forwarded) return forwarded;
+  if (forwarded) return applyScope(forwarded, headers);
   const fromUrl = url.searchParams.getAll("path");
   const suffix = (fromUrl.length > 0 ? fromUrl : list(query.path)).map((part) => part.replace(/^\/+/, "")).filter(Boolean).join("/");
-  if (!isSafeSuffix(suffix)) return `${url.pathname}${url.search}`;
+  if (!isSafeSuffix(suffix)) return applyScope(rawUrl || "/", headers);
   url.searchParams.delete("path");
   const search = url.searchParams.toString();
-  return `/api/${suffix}${search ? `?${search}` : ""}`;
+  return applyScope(`/api/${suffix}${search ? `?${search}` : ""}`, headers);
+}
+function applyScope(raw, headers) {
+  const scope = single(headers["x-otello-scope"]);
+  if (scope !== "live" && scope !== "examples") return raw;
+  const url = new URL(raw, "http://127.0.0.1");
+  if (!url.searchParams.has("scope")) url.searchParams.set("scope", scope);
+  return `${url.pathname}${url.search}`;
 }
 function list(value) {
   if (Array.isArray(value)) return value.map(String);

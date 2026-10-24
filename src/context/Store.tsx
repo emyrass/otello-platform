@@ -85,6 +85,7 @@ export function OtelloProvider({ children }: { children: ReactNode }) {
         cache: "no-store",
         credentials: "same-origin",
         headers: {
+          "x-otello-scope": scopeRef.current,
           ...(init?.body ? { "content-type": "application/json" } : {}),
           ...init?.headers,
         },

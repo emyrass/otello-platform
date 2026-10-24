@@ -1,1 +1,1 @@
-export { default, config } from "./../../index.js";
+export { default, config } from "../../index.js";
