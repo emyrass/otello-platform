@@ -97,7 +97,11 @@ export function OtelloProvider({ children }: { children: ReactNode }) {
     try {
       envelope = text ? (JSON.parse(text) as Envelope) : {};
     } catch {
-      return { errors: ["The ledger is not available from this deployment."], status: response.status || 502 };
+      const snippet = text.replace(/\s+/g, " ").trim().slice(0, 180);
+      return {
+        errors: [snippet ? `The ledger is not available from this deployment. ${snippet}` : "The ledger is not available from this deployment."],
+        status: response.status || 502,
+      };
     }
     if (response.status === 401) {
       setAccount(null);
@@ -138,13 +142,13 @@ export function OtelloProvider({ children }: { children: ReactNode }) {
         }
         if (session.account) {
           setAccount(session.account);
-          if (initialScope === "examples") {
-            const opened = await request("/api/examples/open", { method: "POST" });
-            if (!cancel) applyEnvelope(opened);
-          } else {
-            const workspace = await request("/api/workspace");
-            if (!cancel) applyEnvelope(workspace);
-          }
+          const opened =
+            initialScope === "examples"
+              ? await request("/api/examples/open", { method: "POST" })
+              : await request("/api/workspace");
+          if (cancel) return;
+          applyEnvelope(opened);
+          if (!opened.state && opened.status >= 500) setError(opened.errors?.[0] ?? "The workspace could not be opened.");
         }
         if (!cancel) setReady(true);
       } catch (caught) {

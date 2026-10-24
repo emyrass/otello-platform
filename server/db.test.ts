@@ -80,13 +80,18 @@ describe("ledger database", () => {
       process.env.VERCEL = "1";
       process.env.TURSO_DATABASE_URL = "libsql://example.turso.io";
       process.env.TURSO_AUTH_TOKEN = "token";
-      const { databaseKind, DatabaseConfigError } = await import("./db.ts");
+      const { databaseKind, DatabaseConfigError, configuredTursoHost } = await import("./db.ts");
       expect(databaseKind()).toBe("turso");
       process.env.POSTGRES_URL_NON_POOLING = "postgres://direct.example/otello";
-      expect(databaseKind()).toBe("postgres");
-      delete process.env.POSTGRES_URL_NON_POOLING;
+      expect(databaseKind()).toBe("turso");
+      process.env.TURSO_DATABASE_URL = '"libsql://quoted.turso.io"';
+      process.env.TURSO_AUTH_TOKEN = "'Bearer secret-token'";
+      expect(databaseKind()).toBe("turso");
+      expect(configuredTursoHost()).toBe("quoted.turso.io");
       delete process.env.TURSO_DATABASE_URL;
       delete process.env.TURSO_AUTH_TOKEN;
+      expect(databaseKind()).toBe("postgres");
+      delete process.env.POSTGRES_URL_NON_POOLING;
       expect(() => databaseKind()).toThrow(DatabaseConfigError);
     } finally {
       for (const key of keys) {

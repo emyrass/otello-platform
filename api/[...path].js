@@ -1,9 +1,101 @@
-// server/db.ts
-import { webcrypto } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import path from "node:path";
-import { createClient } from "@libsql/client/http";
-import postgres from "postgres";
+// server/errors.ts
+var DatabaseConfigError = class extends Error {
+  constructor() {
+    const present = [
+      process.env.TURSO_DATABASE_URL ? "TURSO_DATABASE_URL" : "",
+      process.env.TURSO_AUTH_TOKEN ? "TURSO_AUTH_TOKEN" : "",
+      process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL ? "POSTGRES_URL" : ""
+    ].filter(Boolean);
+    super(
+      `The ledger database is not configured. Present: ${present.join(", ") || "none"}. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.`
+    );
+    this.name = "DatabaseConfigError";
+  }
+};
+var LedgerConnectionError = class extends Error {
+  kind;
+  host;
+  constructor(kind, host, message, cause) {
+    super(message, cause === void 0 ? void 0 : { cause });
+    this.name = "LedgerConnectionError";
+    this.kind = kind;
+    this.host = host;
+  }
+};
+function connectionError(kind, host, error, statement) {
+  const sql = statement ? redact(statement.replace(/\s+/g, " ").slice(0, 180)) : "";
+  const detail = redact(causeChain(error)) || "The request failed.";
+  const message = sql ? `${kind} (${host}) ${sql}: ${detail}` : `${kind} (${host}): ${detail}`;
+  const wrapped = new LedgerConnectionError(kind, host, message, error);
+  console.error("[otello] ledger connection failed", {
+    kind,
+    host,
+    sql,
+    detail,
+    stack: error instanceof Error ? error.stack : void 0
+  });
+  return wrapped;
+}
+function publicErrorMessage(error) {
+  if (error instanceof LedgerConnectionError || error instanceof DatabaseConfigError) return redact(error.message).slice(0, 700);
+  return (redact(causeChain(error)) || "The server could not complete that operation.").slice(0, 700);
+}
+function logRequestFailure(status, error) {
+  console.error("[otello] request failed", {
+    status,
+    message: publicErrorMessage(error),
+    stack: error instanceof Error ? error.stack : void 0
+  });
+}
+function causeChain(error) {
+  const parts = [];
+  const seen = /* @__PURE__ */ new Set();
+  let current2 = error;
+  while (current2 != null && !seen.has(current2) && parts.length < 4) {
+    seen.add(current2);
+    if (current2 instanceof Error) {
+      const code = codeOf(current2);
+      const text = current2.message?.trim() || current2.name;
+      parts.push(code ? `${text} [${code}]` : text);
+      current2 = current2.cause;
+    } else {
+      parts.push(String(current2));
+      break;
+    }
+  }
+  return parts.filter(Boolean).join(" \u2014 ");
+}
+function codeOf(error) {
+  const code = error.code;
+  if (typeof code === "string" && code) return code;
+  if (typeof code === "number") return String(code);
+  return void 0;
+}
+function redact(text) {
+  return text.replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[redacted]").replace(/\b(?:postgres|postgresql|libsql|https?):\/\/[^\s'")]+/gi, (url) => {
+    try {
+      const parsed = new URL(url.replace(/^libsql:/i, "https:"));
+      return `${parsed.protocol}//${parsed.host}`;
+    } catch {
+      return "[redacted-url]";
+    }
+  });
+}
+
+// server/fail.ts
+function sendFailure(res, error) {
+  const tooLarge = error instanceof Error && error.message === "too large";
+  const missingDatabase = error instanceof DatabaseConfigError;
+  const status = tooLarge ? 413 : missingDatabase ? 503 : 500;
+  const message = tooLarge ? "That request is too large." : publicErrorMessage(error);
+  logRequestFailure(status, error);
+  if (!res.headersSent) {
+    res.statusCode = status;
+    res.setHeader("content-type", "application/json; charset=utf-8");
+    res.setHeader("cache-control", "no-store");
+  }
+  res.end(JSON.stringify({ errors: [message] }));
+}
 
 // src/lib/hash.ts
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -72,55 +164,6 @@ function bytesToB64Url(bytes) {
   return bytesToB64(bytes).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
-// src/lib/types.ts
-var NETWORKS = ["ethereum", "base", "arbitrum", "polygon"];
-var RPC_METHODS = [
-  "eth_blockNumber",
-  "eth_getBalance",
-  "eth_getBlockByNumber",
-  "eth_call",
-  "eth_getTransactionReceipt"
-];
-var REVOCATION_CONDITIONS = [
-  "The provider may revoke the lease, with a recorded reason, if capacity is withdrawn.",
-  "Access is refused while the agent or the provider is disabled. Accrued usage stays on the books.",
-  "Otello refuses further use when the lease expires, the request allowance is exhausted, or the spending cap is reached.",
-  "The server checks the lease before a request is forwarded. An offer with no endpoint is simulated locally and is not called."
-];
-var RATE_WINDOW_MS = 6e4;
-var GENESIS_HASH = "genesis";
-var MAX_BATCH = 1e5;
-var MIN_DURATION_MS = 15e3;
-
-// src/lib/audit.ts
-function withoutEmpty(draft) {
-  const body = {
-    id: nextId("evt"),
-    timestamp: draft.timestamp,
-    type: draft.type,
-    details: draft.details,
-    prevHash: GENESIS_HASH
-  };
-  if (draft.agentId) body.agentId = draft.agentId;
-  if (draft.providerId) body.providerId = draft.providerId;
-  if (draft.leaseId) body.leaseId = draft.leaseId;
-  if (draft.resourceId) body.resourceId = draft.resourceId;
-  if (draft.network) body.network = draft.network;
-  return body;
-}
-function appendAudit(state, draft) {
-  for (const value of Object.values(draft.details)) {
-    if (typeof value === "string" && value.includes("otl_sim_")) {
-      throw new Error("Refusing to write a credential secret into the audit log.");
-    }
-  }
-  const prevHash = state.audit.length > 0 ? state.audit[state.audit.length - 1].hash : GENESIS_HASH;
-  const body = { ...withoutEmpty(draft), prevHash };
-  const hash = sha256Hex(stableStringify(body));
-  const event = { ...body, hash };
-  return { ...state, audit: [...state.audit, event] };
-}
-
 // src/lib/crypto.ts
 var ECDSA = { name: "ECDSA", namedCurve: "P-256" };
 async function generateSigningKey() {
@@ -173,6 +216,55 @@ async function verifyAgreement(agreement) {
   } catch {
     return false;
   }
+}
+
+// src/lib/types.ts
+var NETWORKS = ["ethereum", "base", "arbitrum", "polygon"];
+var RPC_METHODS = [
+  "eth_blockNumber",
+  "eth_getBalance",
+  "eth_getBlockByNumber",
+  "eth_call",
+  "eth_getTransactionReceipt"
+];
+var REVOCATION_CONDITIONS = [
+  "The provider may revoke the lease, with a recorded reason, if capacity is withdrawn.",
+  "Access is refused while the agent or the provider is disabled. Accrued usage stays on the books.",
+  "Otello refuses further use when the lease expires, the request allowance is exhausted, or the spending cap is reached.",
+  "The server checks the lease before a request is forwarded. An offer with no endpoint is simulated locally and is not called."
+];
+var RATE_WINDOW_MS = 6e4;
+var GENESIS_HASH = "genesis";
+var MAX_BATCH = 1e5;
+var MIN_DURATION_MS = 15e3;
+
+// src/lib/audit.ts
+function withoutEmpty(draft) {
+  const body = {
+    id: nextId("evt"),
+    timestamp: draft.timestamp,
+    type: draft.type,
+    details: draft.details,
+    prevHash: GENESIS_HASH
+  };
+  if (draft.agentId) body.agentId = draft.agentId;
+  if (draft.providerId) body.providerId = draft.providerId;
+  if (draft.leaseId) body.leaseId = draft.leaseId;
+  if (draft.resourceId) body.resourceId = draft.resourceId;
+  if (draft.network) body.network = draft.network;
+  return body;
+}
+function appendAudit(state, draft) {
+  for (const value of Object.values(draft.details)) {
+    if (typeof value === "string" && value.includes("otl_sim_")) {
+      throw new Error("Refusing to write a credential secret into the audit log.");
+    }
+  }
+  const prevHash = state.audit.length > 0 ? state.audit[state.audit.length - 1].hash : GENESIS_HASH;
+  const body = { ...withoutEmpty(draft), prevHash };
+  const hash = sha256Hex(stableStringify(body));
+  const event = { ...body, hash };
+  return { ...state, audit: [...state.audit, event] };
 }
 
 // src/lib/credentials.ts
@@ -1248,470 +1340,6 @@ async function registerProvider(state, name, desk, now, ownerId) {
   return ok(next, { providerId: id });
 }
 
-// src/lib/marketSamples.ts
-var METHODS = [...RPC_METHODS];
-var SAMPLE_KEY = { kty: "EC", crv: "P-256" };
-var LISTED_AT = 17e11;
-var SAMPLE_PROVIDERS = [
-  {
-    id: "sample_prv_northline",
-    name: "Northline Relay",
-    desk: "Sample desk. Public reads from Frankfurt and Ashburn.",
-    status: "active",
-    ownerId: "sample",
-    publicKeyJwk: SAMPLE_KEY,
-    createdAt: LISTED_AT
-  },
-  {
-    id: "sample_prv_harbor",
-    name: "Harbor RPC",
-    desk: "Sample desk. Routes for Arbitrum and Polygon.",
-    status: "active",
-    ownerId: "sample",
-    publicKeyJwk: SAMPLE_KEY,
-    createdAt: LISTED_AT
-  },
-  {
-    id: "sample_prv_sable",
-    name: "Sable Index",
-    desk: "Sample desk. Withdrawn while the feed is down.",
-    status: "active",
-    ownerId: "sample",
-    publicKeyJwk: SAMPLE_KEY,
-    createdAt: LISTED_AT
-  }
-];
-function offer(input) {
-  return {
-    id: input.id,
-    name: input.name,
-    providerId: input.providerId,
-    kind: "rpc",
-    network: input.network,
-    summary: input.summary,
-    availability: input.availability,
-    region: input.region,
-    pricing: { model: "per_thousand_requests", pricePerThousandMicro: input.pricePerThousandMicro },
-    requestRateLimit: input.requestRateLimit,
-    maxLeaseDurationMs: input.maxLeaseHours * 60 * 60 * 1e3,
-    supportedMethods: METHODS,
-    capacityRequests: input.capacityRequests,
-    endpointConfigured: false
-  };
-}
-var SAMPLE_RESOURCES = [
-  offer({
-    id: "sample_res_northline_eth",
-    name: "Northline Ethereum",
-    providerId: "sample_prv_northline",
-    network: "ethereum",
-    summary: "Sample mainnet HTTP reads. Twenty cents per thousand accepted calls.",
-    availability: "available",
-    region: "Frankfurt",
-    pricePerThousandMicro: 2e5,
-    requestRateLimit: 600,
-    maxLeaseHours: 24,
-    capacityRequests: 5e6
-  }),
-  offer({
-    id: "sample_res_northline_base",
-    name: "Northline Base",
-    providerId: "sample_prv_northline",
-    network: "base",
-    summary: "Sample Base HTTP, listed for block and balance polling.",
-    availability: "available",
-    region: "Ashburn",
-    pricePerThousandMicro: 12e4,
-    requestRateLimit: 800,
-    maxLeaseHours: 12,
-    capacityRequests: 4e6
-  }),
-  offer({
-    id: "sample_res_harbor_arb",
-    name: "Harbor Arbitrum",
-    providerId: "sample_prv_harbor",
-    network: "arbitrum",
-    summary: "Sample Arbitrum reads. Spare capacity is limited.",
-    availability: "limited",
-    region: "Lisbon",
-    pricePerThousandMicro: 15e4,
-    requestRateLimit: 400,
-    maxLeaseHours: 6,
-    capacityRequests: 15e5
-  }),
-  offer({
-    id: "sample_res_harbor_pol",
-    name: "Harbor Polygon",
-    providerId: "sample_prv_harbor",
-    network: "polygon",
-    summary: "Sample Polygon HTTP for inexpensive inventory polling.",
-    availability: "available",
-    region: "Amsterdam",
-    pricePerThousandMicro: 8e4,
-    requestRateLimit: 900,
-    maxLeaseHours: 24,
-    capacityRequests: 6e6
-  }),
-  offer({
-    id: "sample_res_sable_pol",
-    name: "Sable Polygon Trace",
-    providerId: "sample_prv_sable",
-    network: "polygon",
-    summary: "Sample Polygon feed. Listed as unavailable.",
-    availability: "unavailable",
-    region: "Paris",
-    pricePerThousandMicro: 25e4,
-    requestRateLimit: 200,
-    maxLeaseHours: 8,
-    capacityRequests: 25e4
-  })
-];
-var SAMPLE_RESOURCE_IDS = new Set(SAMPLE_RESOURCES.map((resource) => resource.id));
-async function ensureSampleMarket(state) {
-  if (state.origin === "example") return state;
-  let next = state;
-  for (const provider of SAMPLE_PROVIDERS) {
-    const saved = next.providers.some((item) => item.id === provider.id);
-    const keyed = Boolean(next.keystore[provider.id]);
-    if (saved && keyed) continue;
-    const keys = await generateSigningKey();
-    if (saved) {
-      next = {
-        ...next,
-        providers: next.providers.map((item) => item.id === provider.id ? { ...item, publicKeyJwk: keys.publicJwk } : item),
-        keystore: { ...next.keystore, [provider.id]: keys.privateJwk }
-      };
-      continue;
-    }
-    next = await addProvider(
-      next,
-      {
-        id: provider.id,
-        name: provider.name,
-        desk: provider.desk,
-        status: provider.status,
-        ownerId: provider.ownerId,
-        createdAt: provider.createdAt
-      },
-      keys.privateJwk,
-      keys.publicJwk
-    );
-  }
-  const known = new Set(next.resources.map((resource) => resource.id));
-  const missing = SAMPLE_RESOURCES.filter((resource) => !known.has(resource.id));
-  if (missing.length > 0) next = { ...next, resources: [...next.resources, ...missing] };
-  return next === state ? state : next;
-}
-
-// server/db.ts
-if (!globalThis.crypto?.subtle) {
-  Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
-}
-var DatabaseConfigError = class extends Error {
-  constructor() {
-    super("The ledger database is not configured. In the Vercel project, add Postgres so POSTGRES_URL is set, or set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.");
-    this.name = "DatabaseConfigError";
-  }
-};
-var sqliteExecutor;
-var postgresClient;
-var tursoClient;
-var schemaReady;
-function databaseKind() {
-  if (process.env.OTELLO_SQLITE_PATH && !hosted()) return "sqlite";
-  if (postgresUrl()) return "postgres";
-  if (tursoConfig()) return "turso";
-  if (hosted()) throw new DatabaseConfigError();
-  return "sqlite";
-}
-function hosted() {
-  return Boolean(process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME);
-}
-function envValue(name) {
-  const value = process.env[name]?.trim();
-  return value ? value : void 0;
-}
-function postgresUrl() {
-  return envValue("POSTGRES_URL_NON_POOLING") || envValue("DATABASE_URL_UNPOOLED") || envValue("POSTGRES_URL") || envValue("DATABASE_URL") || envValue("POSTGRES_PRISMA_URL");
-}
-function tursoConfig() {
-  const url = envValue("TURSO_DATABASE_URL");
-  const authToken = envValue("TURSO_AUTH_TOKEN");
-  if (!url || !authToken) return void 0;
-  return { url, authToken };
-}
-function toDollar(statement) {
-  let index = 0;
-  return statement.replace(/\?/g, () => `$${++index}`);
-}
-function sqlitePath() {
-  return process.env.OTELLO_SQLITE_PATH || path.join(process.cwd(), "data", "otello.sqlite");
-}
-async function openSqlite() {
-  if (sqliteExecutor) return sqliteExecutor;
-  const { DatabaseSync } = await import("node:sqlite");
-  const file = sqlitePath();
-  mkdirSync(path.dirname(file), { recursive: true });
-  const database = new DatabaseSync(file);
-  database.exec("PRAGMA journal_mode = WAL;");
-  sqliteExecutor = {
-    async get(statement, params) {
-      const row = database.prepare(statement).get(...params);
-      return row;
-    },
-    async run(statement, params) {
-      database.prepare(statement).run(...params);
-    },
-    async changes(statement, params) {
-      const result = database.prepare(statement).run(...params);
-      return Number(result.changes ?? 0);
-    }
-  };
-  return sqliteExecutor;
-}
-function postgresSql() {
-  if (postgresClient) return postgresClient;
-  const url = postgresUrl();
-  if (!url) throw new DatabaseConfigError();
-  const pooled = /pooler|pgbouncer/i.test(url);
-  postgresClient = postgres(url, {
-    ssl: url.includes("sslmode=disable") ? false : "require",
-    max: 1,
-    prepare: false,
-    fetch_types: false,
-    idle_timeout: pooled ? 0 : 20,
-    connect_timeout: 10,
-    max_lifetime: 60 * 5
-  });
-  return postgresClient;
-}
-function postgresExecutor(sql) {
-  return {
-    async get(statement, params) {
-      const rows = await sql.unsafe(toDollar(statement), params);
-      const row = rows[0];
-      return row ? row : void 0;
-    },
-    async run(statement, params) {
-      await sql.unsafe(toDollar(statement), params);
-    },
-    async changes(statement, params) {
-      const rows = await sql.unsafe(toDollar(statement), params);
-      return Number(rows.count ?? 0);
-    }
-  };
-}
-function turso() {
-  if (tursoClient) return tursoClient;
-  const config2 = tursoConfig();
-  if (!config2) throw new DatabaseConfigError();
-  tursoClient = createClient({ url: config2.url, authToken: config2.authToken, intMode: "number" });
-  return tursoClient;
-}
-function tursoExecutor(client) {
-  return {
-    async get(statement, params) {
-      const result = await client.execute({ sql: statement, args: params });
-      const row = result.rows[0];
-      return row ? row : void 0;
-    },
-    async run(statement, params) {
-      await client.execute({ sql: statement, args: params });
-    },
-    async changes(statement, params) {
-      const result = await client.execute({ sql: statement, args: params });
-      return Number(result.rowsAffected ?? 0);
-    }
-  };
-}
-async function current() {
-  const kind = databaseKind();
-  if (kind === "sqlite") return openSqlite();
-  if (kind === "postgres") return postgresExecutor(postgresSql());
-  return tursoExecutor(turso());
-}
-var SQLITE_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS accounts (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    created_at INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
-    expires_at INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS ledgers (
-    scope TEXT PRIMARY KEY,
-    document TEXT NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-`;
-var REMOTE_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS accounts (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    created_at BIGINT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
-    expires_at BIGINT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS ledgers (
-    scope TEXT PRIMARY KEY,
-    document TEXT NOT NULL,
-    updated_at BIGINT NOT NULL
-  );
-`;
-function ensureSchema() {
-  schemaReady ??= (async () => {
-    const executor = await current();
-    const schema = databaseKind() === "sqlite" ? SQLITE_SCHEMA : REMOTE_SCHEMA;
-    for (const statement of schema.split(";").map((part) => part.trim()).filter(Boolean)) {
-      await executor.run(statement, []);
-    }
-  })().catch((error) => {
-    schemaReady = void 0;
-    throw error;
-  });
-  return schemaReady;
-}
-function asText(value) {
-  if (typeof value === "string") return value;
-  if (value instanceof Uint8Array) return new TextDecoder().decode(value);
-  return null;
-}
-function asNumber(value) {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "bigint") return Number(value);
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-async function readLedgerRecord(scope) {
-  await ensureSchema();
-  const row = await (await current()).get("SELECT document, updated_at FROM ledgers WHERE scope = ?", [scope]);
-  if (!row) return null;
-  const document = asText(row.document);
-  const updatedAt = asNumber(row.updated_at);
-  if (!document || updatedAt === null) return null;
-  return { state: JSON.parse(document), updatedAt };
-}
-async function readLedger(scope) {
-  const record = await readLedgerRecord(scope);
-  return record?.state ?? null;
-}
-async function writeLedger(scope, state, expectedUpdatedAt) {
-  await ensureSchema();
-  const stamp = expectedUpdatedAt == null ? Date.now() : Math.max(Date.now(), expectedUpdatedAt + 1);
-  const document = JSON.stringify(state);
-  const executor = await current();
-  if (expectedUpdatedAt === void 0) {
-    await executor.run(
-      `INSERT INTO ledgers (scope, document, updated_at) VALUES (?, ?, ?)
-       ON CONFLICT(scope) DO UPDATE SET document = excluded.document, updated_at = excluded.updated_at`,
-      [scope, document, stamp]
-    );
-    return true;
-  }
-  if (expectedUpdatedAt === null) {
-    const inserted = await executor.changes(
-      `INSERT INTO ledgers (scope, document, updated_at) VALUES (?, ?, ?)
-       ON CONFLICT(scope) DO NOTHING`,
-      [scope, document, stamp]
-    );
-    return inserted > 0;
-  }
-  const updated = await executor.changes(
-    "UPDATE ledgers SET document = ?, updated_at = ? WHERE scope = ? AND updated_at = ?",
-    [document, stamp, scope, expectedUpdatedAt]
-  );
-  return updated > 0;
-}
-async function loadLedger(scope, now = Date.now()) {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const record = await readLedgerRecord(scope);
-    const base = record?.state ?? emptyState(now);
-    const seeded = scope === "live" ? await ensureSampleMarket(base) : base;
-    const next = reconcile(seeded, now);
-    if (record && next === record.state) return next;
-    const saved = await writeLedger(scope, next, record?.updatedAt ?? null);
-    if (saved) return next;
-  }
-  return await readLedger(scope) ?? emptyState(now);
-}
-var queue = Promise.resolve();
-function withLedger(task) {
-  const run = queue.then(async () => {
-    await ensureSchema();
-    return task();
-  });
-  queue = run.then(
-    () => void 0,
-    () => void 0
-  );
-  return run;
-}
-async function commitChange(scope, task) {
-  return withLedger(async () => {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const now = Date.now();
-      const record = await readLedgerRecord(scope);
-      const base = record?.state ?? emptyState(now);
-      const seeded = scope === "live" ? await ensureSampleMarket(base) : base;
-      const prepared = reconcile(seeded, now);
-      const changed = await task(prepared, now);
-      if (record && changed.state === record.state) return { before: prepared, state: prepared, value: changed.value };
-      const saved = await writeLedger(scope, changed.state, record?.updatedAt ?? null);
-      if (!saved) continue;
-      const committed = await readLedger(scope);
-      if (!committed) continue;
-      const leaseId = leaseIdOf(changed.value);
-      if (leaseId) {
-        const wanted = changed.state.leases.find((lease) => lease.id === leaseId);
-        const seen = committed.leases.find((lease) => lease.id === leaseId);
-        if (!wanted || !seen) continue;
-        if (seen.status !== wanted.status) continue;
-        if (Boolean(wanted.agreement) !== Boolean(seen.agreement)) continue;
-        if (Boolean(wanted.credential) !== Boolean(seen.credential)) continue;
-      }
-      return { before: prepared, state: committed, value: changed.value };
-    }
-    throw new Error("The ledger commit did not persist.");
-  });
-}
-function leaseIdOf(value) {
-  if (!value || typeof value !== "object" || !("leaseId" in value)) return void 0;
-  const leaseId = value.leaseId;
-  return typeof leaseId === "string" ? leaseId : void 0;
-}
-async function dbGet(statement, params) {
-  await ensureSchema();
-  return (await current()).get(statement, params);
-}
-async function dbRun(statement, params) {
-  await ensureSchema();
-  return (await current()).run(statement, params);
-}
-
-// server/fail.ts
-function sendFailure(res, error) {
-  const tooLarge = error instanceof Error && error.message === "too large";
-  const missingDatabase = error instanceof DatabaseConfigError;
-  const status = tooLarge ? 413 : missingDatabase ? 503 : 500;
-  const message = tooLarge ? "That request is too large." : missingDatabase ? error.message : "The server could not complete that operation.";
-  if (!res.headersSent) {
-    res.statusCode = status;
-    res.setHeader("content-type", "application/json; charset=utf-8");
-  }
-  res.end(JSON.stringify({ errors: [message] }));
-}
-
 // src/lib/seed.ts
 var ALL_METHODS = [...RPC_METHODS];
 var READ_METHODS = ALL_METHODS.filter((method) => method !== "eth_call");
@@ -1734,7 +1362,7 @@ async function send(state, leaseId, agentId, method, requestCount, now, label) {
   if (!result.result.ok) throw new Error(`${label}: ${result.result.reason ?? "denied"}`);
   return result.state;
 }
-function offer2(input) {
+function offer(input) {
   return {
     id: input.id,
     name: input.name,
@@ -1775,7 +1403,7 @@ async function createSeedState(now) {
     { id: "agt_cinder", name: "Cinder Route", mandate: "Polygon inventory and transfer receipts.", status: "active", ownerId: "example", createdAt: now - 14 * hour }
   ];
   const resources = [
-    offer2({
+    offer({
       id: "res_northline_eth",
       name: "Northline Ethereum",
       providerId: "prv_northline",
@@ -1789,7 +1417,7 @@ async function createSeedState(now) {
       supportedMethods: ALL_METHODS,
       capacityRequests: 5e6
     }),
-    offer2({
+    offer({
       id: "res_northline_base",
       name: "Northline Base",
       providerId: "prv_northline",
@@ -1803,7 +1431,7 @@ async function createSeedState(now) {
       supportedMethods: ALL_METHODS,
       capacityRequests: 4e6
     }),
-    offer2({
+    offer({
       id: "res_harbor_arb",
       name: "Harbor Arbitrum",
       providerId: "prv_harbor",
@@ -1817,7 +1445,7 @@ async function createSeedState(now) {
       supportedMethods: ALL_METHODS,
       capacityRequests: 15e5
     }),
-    offer2({
+    offer({
       id: "res_harbor_pol",
       name: "Harbor Polygon",
       providerId: "prv_harbor",
@@ -1831,7 +1459,7 @@ async function createSeedState(now) {
       supportedMethods: ALL_METHODS,
       capacityRequests: 6e6
     }),
-    offer2({
+    offer({
       id: "res_kiln_eth",
       name: "Kiln Archive",
       providerId: "prv_kiln",
@@ -1845,7 +1473,7 @@ async function createSeedState(now) {
       supportedMethods: ALL_METHODS,
       capacityRequests: 4e5
     }),
-    offer2({
+    offer({
       id: "res_sable_pol",
       name: "Sable Polygon Trace",
       providerId: "prv_sable",
@@ -1859,7 +1487,7 @@ async function createSeedState(now) {
       supportedMethods: ALL_METHODS,
       capacityRequests: 25e4
     }),
-    offer2({
+    offer({
       id: "res_marlowe_base",
       name: "Marlowe Base",
       providerId: "prv_marlowe",
@@ -1873,7 +1501,7 @@ async function createSeedState(now) {
       supportedMethods: READ_METHODS,
       capacityRequests: 8e5
     }),
-    offer2({
+    offer({
       id: "res_kiln_arb",
       name: "Kiln Arbitrum Light",
       providerId: "prv_kiln",
@@ -2111,6 +1739,609 @@ function toPublicState(state) {
 
 // server/auth.ts
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+
+// server/db.ts
+import { webcrypto } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import path from "node:path";
+import postgres from "postgres";
+
+// src/lib/marketSamples.ts
+var METHODS = [...RPC_METHODS];
+var SAMPLE_KEY = { kty: "EC", crv: "P-256" };
+var LISTED_AT = 17e11;
+var SAMPLE_PROVIDERS = [
+  {
+    id: "sample_prv_northline",
+    name: "Northline Relay",
+    desk: "Sample desk. Public reads from Frankfurt and Ashburn.",
+    status: "active",
+    ownerId: "sample",
+    publicKeyJwk: SAMPLE_KEY,
+    createdAt: LISTED_AT
+  },
+  {
+    id: "sample_prv_harbor",
+    name: "Harbor RPC",
+    desk: "Sample desk. Routes for Arbitrum and Polygon.",
+    status: "active",
+    ownerId: "sample",
+    publicKeyJwk: SAMPLE_KEY,
+    createdAt: LISTED_AT
+  },
+  {
+    id: "sample_prv_sable",
+    name: "Sable Index",
+    desk: "Sample desk. Withdrawn while the feed is down.",
+    status: "active",
+    ownerId: "sample",
+    publicKeyJwk: SAMPLE_KEY,
+    createdAt: LISTED_AT
+  }
+];
+function offer2(input) {
+  return {
+    id: input.id,
+    name: input.name,
+    providerId: input.providerId,
+    kind: "rpc",
+    network: input.network,
+    summary: input.summary,
+    availability: input.availability,
+    region: input.region,
+    pricing: { model: "per_thousand_requests", pricePerThousandMicro: input.pricePerThousandMicro },
+    requestRateLimit: input.requestRateLimit,
+    maxLeaseDurationMs: input.maxLeaseHours * 60 * 60 * 1e3,
+    supportedMethods: METHODS,
+    capacityRequests: input.capacityRequests,
+    endpointConfigured: false
+  };
+}
+var SAMPLE_RESOURCES = [
+  offer2({
+    id: "sample_res_northline_eth",
+    name: "Northline Ethereum",
+    providerId: "sample_prv_northline",
+    network: "ethereum",
+    summary: "Sample mainnet HTTP reads. Twenty cents per thousand accepted calls.",
+    availability: "available",
+    region: "Frankfurt",
+    pricePerThousandMicro: 2e5,
+    requestRateLimit: 600,
+    maxLeaseHours: 24,
+    capacityRequests: 5e6
+  }),
+  offer2({
+    id: "sample_res_northline_base",
+    name: "Northline Base",
+    providerId: "sample_prv_northline",
+    network: "base",
+    summary: "Sample Base HTTP, listed for block and balance polling.",
+    availability: "available",
+    region: "Ashburn",
+    pricePerThousandMicro: 12e4,
+    requestRateLimit: 800,
+    maxLeaseHours: 12,
+    capacityRequests: 4e6
+  }),
+  offer2({
+    id: "sample_res_harbor_arb",
+    name: "Harbor Arbitrum",
+    providerId: "sample_prv_harbor",
+    network: "arbitrum",
+    summary: "Sample Arbitrum reads. Spare capacity is limited.",
+    availability: "limited",
+    region: "Lisbon",
+    pricePerThousandMicro: 15e4,
+    requestRateLimit: 400,
+    maxLeaseHours: 6,
+    capacityRequests: 15e5
+  }),
+  offer2({
+    id: "sample_res_harbor_pol",
+    name: "Harbor Polygon",
+    providerId: "sample_prv_harbor",
+    network: "polygon",
+    summary: "Sample Polygon HTTP for inexpensive inventory polling.",
+    availability: "available",
+    region: "Amsterdam",
+    pricePerThousandMicro: 8e4,
+    requestRateLimit: 900,
+    maxLeaseHours: 24,
+    capacityRequests: 6e6
+  }),
+  offer2({
+    id: "sample_res_sable_pol",
+    name: "Sable Polygon Trace",
+    providerId: "sample_prv_sable",
+    network: "polygon",
+    summary: "Sample Polygon feed. Listed as unavailable.",
+    availability: "unavailable",
+    region: "Paris",
+    pricePerThousandMicro: 25e4,
+    requestRateLimit: 200,
+    maxLeaseHours: 8,
+    capacityRequests: 25e4
+  })
+];
+var SAMPLE_RESOURCE_IDS = new Set(SAMPLE_RESOURCES.map((resource) => resource.id));
+async function ensureSampleMarket(state) {
+  if (state.origin === "example") return state;
+  let next = state;
+  for (const provider of SAMPLE_PROVIDERS) {
+    const saved = next.providers.some((item) => item.id === provider.id);
+    const keyed = Boolean(next.keystore[provider.id]);
+    if (saved && keyed) continue;
+    const keys = await generateSigningKey();
+    if (saved) {
+      next = {
+        ...next,
+        providers: next.providers.map((item) => item.id === provider.id ? { ...item, publicKeyJwk: keys.publicJwk } : item),
+        keystore: { ...next.keystore, [provider.id]: keys.privateJwk }
+      };
+      continue;
+    }
+    next = await addProvider(
+      next,
+      {
+        id: provider.id,
+        name: provider.name,
+        desk: provider.desk,
+        status: provider.status,
+        ownerId: provider.ownerId,
+        createdAt: provider.createdAt
+      },
+      keys.privateJwk,
+      keys.publicJwk
+    );
+  }
+  const known = new Set(next.resources.map((resource) => resource.id));
+  const missing = SAMPLE_RESOURCES.filter((resource) => !known.has(resource.id));
+  if (missing.length > 0) next = { ...next, resources: [...next.resources, ...missing] };
+  return next === state ? state : next;
+}
+
+// server/turso.ts
+function tursoPipelineUrl(raw) {
+  const trimmed = stripQuotes(raw.trim());
+  let withScheme = trimmed;
+  if (/^libsql:\/\//i.test(withScheme)) withScheme = `https://${withScheme.slice("libsql://".length)}`;
+  else if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(withScheme)) withScheme = `https://${withScheme}`;
+  const parsed = new URL(withScheme);
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(`The Turso URL must use libsql, https, or http (${parsed.protocol}).`);
+  }
+  return `${parsed.origin}/v2/pipeline`;
+}
+function tursoHost(raw) {
+  try {
+    return new URL(tursoPipelineUrl(raw)).host;
+  } catch {
+    return "invalid";
+  }
+}
+async function tursoExecute(config2, statement, params, wantRows, fetchImpl = globalThis.fetch) {
+  const pipelineUrl = tursoPipelineUrl(config2.url);
+  const body = JSON.stringify({
+    requests: [
+      {
+        type: "execute",
+        stmt: {
+          sql: statement,
+          args: params.map(encodeValue),
+          named_args: [],
+          want_rows: wantRows
+        }
+      },
+      { type: "close" }
+    ]
+  });
+  let response;
+  try {
+    response = await fetchImpl(pipelineUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config2.authToken}`
+      },
+      body,
+      duplex: "half",
+      signal: AbortSignal.timeout(12e3)
+    });
+  } catch (error) {
+    throw new Error(`The Turso host did not answer (${tursoHost(config2.url)}).`, { cause: error });
+  }
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${serverMessage(text) || response.statusText || "Turso rejected the request."}`);
+  }
+  let payload2;
+  try {
+    payload2 = text ? JSON.parse(text) : {};
+  } catch (error) {
+    throw new Error("Turso returned a response that was not JSON.", { cause: error });
+  }
+  const result = executeResult(payload2);
+  return { row: rowFrom(result), rowsAffected: Number(result.affected_row_count ?? 0) };
+}
+function encodeValue(value) {
+  if (value === null) return { type: "null" };
+  if (typeof value === "number") {
+    if (Number.isSafeInteger(value)) return { type: "integer", value: String(value) };
+    return { type: "float", value };
+  }
+  return { type: "text", value };
+}
+function executeResult(payload2) {
+  if (!payload2 || typeof payload2 !== "object") throw new Error("Turso returned an empty pipeline response.");
+  const results = payload2.results;
+  if (!Array.isArray(results) || results.length === 0) throw new Error("Turso returned no pipeline result.");
+  const first = results[0];
+  if (!first || typeof first !== "object") throw new Error("Turso returned an unreadable pipeline result.");
+  const entry = first;
+  if (entry.type === "error") {
+    const message = entry.error?.message || "Turso rejected the statement.";
+    const code = entry.error?.code ? ` [${entry.error.code}]` : "";
+    throw new Error(`${message}${code}`);
+  }
+  if (entry.type !== "ok" || entry.response?.type !== "execute" || !entry.response.result) {
+    throw new Error("Turso returned an unexpected pipeline result.");
+  }
+  return entry.response.result;
+}
+function rowFrom(result) {
+  const values = result.rows?.[0];
+  if (!values) return void 0;
+  const row = {};
+  values.forEach((value, index) => {
+    const name = result.cols?.[index]?.name || String(index);
+    row[name] = decodeValue(value);
+  });
+  return row;
+}
+function decodeValue(value) {
+  if (!value || value.type === "null") return null;
+  if (value.type === "integer") {
+    const parsed = Number(value.value);
+    return Number.isSafeInteger(parsed) ? parsed : String(value.value);
+  }
+  if (value.type === "float" || value.type === "text") return value.value ?? null;
+  if (value.type === "blob" && value.base64) return Uint8Array.from(Buffer.from(value.base64, "base64"));
+  return null;
+}
+function serverMessage(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed.message === "string") return parsed.message;
+    if (typeof parsed.error === "string") return parsed.error;
+  } catch {
+  }
+  return trimmed.replace(/\s+/g, " ").slice(0, 300);
+}
+function stripQuotes(value) {
+  if (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).trim();
+  }
+  return value;
+}
+
+// server/db.ts
+if (!globalThis.crypto?.subtle) {
+  Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
+}
+var sqliteExecutor;
+var postgresClient;
+var schemaReady;
+function databaseKind() {
+  if (process.env.OTELLO_SQLITE_PATH && !hosted()) return "sqlite";
+  if (tursoConfig()) return "turso";
+  if (postgresUrl()) return "postgres";
+  if (hosted()) throw new DatabaseConfigError();
+  return "sqlite";
+}
+function hosted() {
+  return Boolean(process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME);
+}
+function envValue(name) {
+  let value = process.env[name]?.trim();
+  if (!value) return void 0;
+  if (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'")) {
+    value = value.slice(1, -1).trim();
+  }
+  return value ? value : void 0;
+}
+function postgresUrl() {
+  return envValue("POSTGRES_URL_NON_POOLING") || envValue("DATABASE_URL_UNPOOLED") || envValue("POSTGRES_URL") || envValue("DATABASE_URL") || envValue("POSTGRES_PRISMA_URL");
+}
+function tursoConfig() {
+  const url = envValue("TURSO_DATABASE_URL");
+  const authToken = envValue("TURSO_AUTH_TOKEN")?.replace(/^Bearer\s+/i, "");
+  if (!url || !authToken) return void 0;
+  return { url, authToken, host: tursoHost(url) };
+}
+function toDollar(statement) {
+  let index = 0;
+  return statement.replace(/\?/g, () => `$${++index}`);
+}
+function sqlitePath() {
+  return process.env.OTELLO_SQLITE_PATH || path.join(process.cwd(), "data", "otello.sqlite");
+}
+async function openSqlite() {
+  if (sqliteExecutor) return sqliteExecutor;
+  const { DatabaseSync } = await import("node:sqlite");
+  const file = sqlitePath();
+  mkdirSync(path.dirname(file), { recursive: true });
+  const database = new DatabaseSync(file);
+  database.exec("PRAGMA journal_mode = WAL;");
+  sqliteExecutor = {
+    async get(statement, params) {
+      const row = database.prepare(statement).get(...params);
+      return row;
+    },
+    async run(statement, params) {
+      database.prepare(statement).run(...params);
+    },
+    async changes(statement, params) {
+      const result = database.prepare(statement).run(...params);
+      return Number(result.changes ?? 0);
+    }
+  };
+  return sqliteExecutor;
+}
+function postgresSql() {
+  if (postgresClient) return postgresClient;
+  const url = postgresUrl();
+  if (!url) throw new DatabaseConfigError();
+  const pooled = /pooler|pgbouncer/i.test(url);
+  postgresClient = postgres(url, {
+    ssl: url.includes("sslmode=disable") ? false : "require",
+    max: 1,
+    prepare: false,
+    fetch_types: false,
+    idle_timeout: pooled ? 0 : 20,
+    connect_timeout: 10,
+    max_lifetime: 60 * 5
+  });
+  return postgresClient;
+}
+function postgresHost() {
+  const url = postgresUrl();
+  if (!url) return "unset";
+  try {
+    return new URL(url).host || "unknown";
+  } catch {
+    return "invalid";
+  }
+}
+function postgresExecutor(sql) {
+  const host = postgresHost();
+  return {
+    async get(statement, params) {
+      try {
+        const rows = await sql.unsafe(toDollar(statement), params);
+        const row = rows[0];
+        return row ? row : void 0;
+      } catch (error) {
+        throw connectionError("postgres", host, error, statement);
+      }
+    },
+    async run(statement, params) {
+      try {
+        await sql.unsafe(toDollar(statement), params);
+      } catch (error) {
+        throw connectionError("postgres", host, error, statement);
+      }
+    },
+    async changes(statement, params) {
+      try {
+        const rows = await sql.unsafe(toDollar(statement), params);
+        return Number(rows.count ?? 0);
+      } catch (error) {
+        throw connectionError("postgres", host, error, statement);
+      }
+    }
+  };
+}
+function tursoExecutor() {
+  const config2 = tursoConfig();
+  if (!config2) throw new DatabaseConfigError();
+  const call = async (statement, params, wantRows) => {
+    try {
+      return await tursoExecute(config2, statement, params, wantRows);
+    } catch (error) {
+      throw connectionError("turso", config2.host, error, statement);
+    }
+  };
+  return {
+    async get(statement, params) {
+      return (await call(statement, params, true)).row;
+    },
+    async run(statement, params) {
+      await call(statement, params, false);
+    },
+    async changes(statement, params) {
+      return (await call(statement, params, false)).rowsAffected;
+    }
+  };
+}
+async function current() {
+  const kind = databaseKind();
+  if (kind === "sqlite") return openSqlite();
+  if (kind === "postgres") return postgresExecutor(postgresSql());
+  return tursoExecutor();
+}
+var SQLITE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS accounts (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS ledgers (
+    scope TEXT PRIMARY KEY,
+    document TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+`;
+var REMOTE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS accounts (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    created_at BIGINT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    expires_at BIGINT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS ledgers (
+    scope TEXT PRIMARY KEY,
+    document TEXT NOT NULL,
+    updated_at BIGINT NOT NULL
+  );
+`;
+function ensureSchema() {
+  schemaReady ??= (async () => {
+    const executor = await current();
+    const schema = databaseKind() === "sqlite" ? SQLITE_SCHEMA : REMOTE_SCHEMA;
+    for (const statement of schema.split(";").map((part) => part.trim()).filter(Boolean)) {
+      await executor.run(statement, []);
+    }
+  })().catch((error) => {
+    schemaReady = void 0;
+    throw error;
+  });
+  return schemaReady;
+}
+function asText(value) {
+  if (typeof value === "string") return value;
+  if (value instanceof Uint8Array) return new TextDecoder().decode(value);
+  return null;
+}
+function asNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+async function readLedgerRecord(scope) {
+  await ensureSchema();
+  const row = await (await current()).get("SELECT document, updated_at FROM ledgers WHERE scope = ?", [scope]);
+  if (!row) return null;
+  const document = asText(row.document);
+  const updatedAt = asNumber(row.updated_at);
+  if (!document || updatedAt === null) return null;
+  return { state: JSON.parse(document), updatedAt };
+}
+async function readLedger(scope) {
+  const record = await readLedgerRecord(scope);
+  return record?.state ?? null;
+}
+async function writeLedger(scope, state, expectedUpdatedAt) {
+  await ensureSchema();
+  const stamp = expectedUpdatedAt == null ? Date.now() : Math.max(Date.now(), expectedUpdatedAt + 1);
+  const document = JSON.stringify(state);
+  const executor = await current();
+  if (expectedUpdatedAt === void 0) {
+    await executor.run(
+      `INSERT INTO ledgers (scope, document, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(scope) DO UPDATE SET document = excluded.document, updated_at = excluded.updated_at`,
+      [scope, document, stamp]
+    );
+    return true;
+  }
+  if (expectedUpdatedAt === null) {
+    const inserted = await executor.changes(
+      `INSERT INTO ledgers (scope, document, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(scope) DO NOTHING`,
+      [scope, document, stamp]
+    );
+    return inserted > 0;
+  }
+  const updated = await executor.changes(
+    "UPDATE ledgers SET document = ?, updated_at = ? WHERE scope = ? AND updated_at = ?",
+    [document, stamp, scope, expectedUpdatedAt]
+  );
+  return updated > 0;
+}
+async function loadLedger(scope, now = Date.now()) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const record = await readLedgerRecord(scope);
+    const base = record?.state ?? emptyState(now);
+    const seeded = scope === "live" ? await ensureSampleMarket(base) : base;
+    const next = reconcile(seeded, now);
+    if (record && next === record.state) return next;
+    const saved = await writeLedger(scope, next, record?.updatedAt ?? null);
+    if (saved) return next;
+  }
+  return await readLedger(scope) ?? emptyState(now);
+}
+var queue = Promise.resolve();
+function withLedger(task) {
+  const run = queue.then(async () => {
+    await ensureSchema();
+    return task();
+  });
+  queue = run.then(
+    () => void 0,
+    () => void 0
+  );
+  return run;
+}
+async function commitChange(scope, task) {
+  return withLedger(async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const now = Date.now();
+      const record = await readLedgerRecord(scope);
+      const base = record?.state ?? emptyState(now);
+      const seeded = scope === "live" ? await ensureSampleMarket(base) : base;
+      const prepared = reconcile(seeded, now);
+      const changed = await task(prepared, now);
+      if (record && changed.state === record.state) return { before: prepared, state: prepared, value: changed.value };
+      const saved = await writeLedger(scope, changed.state, record?.updatedAt ?? null);
+      if (!saved) continue;
+      const committed = await readLedger(scope);
+      if (!committed) continue;
+      const leaseId = leaseIdOf(changed.value);
+      if (leaseId) {
+        const wanted = changed.state.leases.find((lease) => lease.id === leaseId);
+        const seen = committed.leases.find((lease) => lease.id === leaseId);
+        if (!wanted || !seen) continue;
+        if (seen.status !== wanted.status) continue;
+        if (Boolean(wanted.agreement) !== Boolean(seen.agreement)) continue;
+        if (Boolean(wanted.credential) !== Boolean(seen.credential)) continue;
+      }
+      return { before: prepared, state: committed, value: changed.value };
+    }
+    throw new Error("The ledger commit did not persist.");
+  });
+}
+function leaseIdOf(value) {
+  if (!value || typeof value !== "object" || !("leaseId" in value)) return void 0;
+  const leaseId = value.leaseId;
+  return typeof leaseId === "string" ? leaseId : void 0;
+}
+async function dbGet(statement, params) {
+  await ensureSchema();
+  return (await current()).get(statement, params);
+}
+async function dbRun(statement, params) {
+  await ensureSchema();
+  return (await current()).run(statement, params);
+}
+
+// server/auth.ts
 var COOKIE = "otello_session";
 var SESSION_MS = 14 * 24 * 60 * 60 * 1e3;
 function hashPassword(password) {
@@ -2550,8 +2781,13 @@ async function register(req, res) {
     const account = await createAccount(name, password);
     writeSessionCookie(res, await openSession(account.id), req);
     send2(res, 200, { account });
-  } catch {
-    send2(res, 409, { errors: ["That name is already registered."] });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/unique|already exists/i.test(message)) {
+      send2(res, 409, { errors: ["That name is already registered."] });
+      return;
+    }
+    throw error;
   }
 }
 async function login(req, res) {

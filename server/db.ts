@@ -1,11 +1,14 @@
 import { webcrypto } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import { createClient, type Client, type InValue } from "@libsql/client/http";
 import postgres, { type Sql } from "postgres";
 import { emptyState, reconcile } from "../src/lib/engine.ts";
 import { ensureSampleMarket } from "../src/lib/marketSamples.ts";
 import type { AppState } from "../src/lib/types.ts";
+import { connectionError, DatabaseConfigError } from "./errors.ts";
+import { tursoExecute, tursoHost, type Row as TursoRow } from "./turso.ts";
+
+export { DatabaseConfigError };
 
 if (!globalThis.crypto?.subtle) {
   Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
@@ -13,15 +16,8 @@ if (!globalThis.crypto?.subtle) {
 
 export type Scope = "live" | "examples";
 
-export class DatabaseConfigError extends Error {
-  constructor() {
-    super("The ledger database is not configured. In the Vercel project, add Postgres so POSTGRES_URL is set, or set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.");
-    this.name = "DatabaseConfigError";
-  }
-}
-
 type SqlValue = string | number | null;
-type Row = Record<string, unknown>;
+type Row = TursoRow;
 
 interface Executor {
   get(statement: string, params: SqlValue[]): Promise<Row | undefined>;
@@ -33,13 +29,12 @@ type Kind = "sqlite" | "postgres" | "turso";
 
 let sqliteExecutor: Executor | undefined;
 let postgresClient: Sql | undefined;
-let tursoClient: Client | undefined;
 let schemaReady: Promise<void> | undefined;
 
 export function databaseKind(): Kind {
   if (process.env.OTELLO_SQLITE_PATH && !hosted()) return "sqlite";
-  if (postgresUrl()) return "postgres";
   if (tursoConfig()) return "turso";
+  if (postgresUrl()) return "postgres";
   if (hosted()) throw new DatabaseConfigError();
   return "sqlite";
 }
@@ -49,7 +44,11 @@ function hosted(): boolean {
 }
 
 function envValue(name: string): string | undefined {
-  const value = process.env[name]?.trim();
+  let value = process.env[name]?.trim();
+  if (!value) return undefined;
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1).trim();
+  }
   return value ? value : undefined;
 }
 
@@ -63,11 +62,15 @@ function postgresUrl(): string | undefined {
   );
 }
 
-function tursoConfig(): { url: string; authToken: string } | undefined {
+function tursoConfig(): { url: string; authToken: string; host: string } | undefined {
   const url = envValue("TURSO_DATABASE_URL");
-  const authToken = envValue("TURSO_AUTH_TOKEN");
+  const authToken = envValue("TURSO_AUTH_TOKEN")?.replace(/^Bearer\s+/i, "");
   if (!url || !authToken) return undefined;
-  return { url, authToken };
+  return { url, authToken, host: tursoHost(url) };
+}
+
+export function configuredTursoHost(): string | undefined {
+  return tursoConfig()?.host;
 }
 
 function toDollar(statement: string): string {
@@ -119,44 +122,65 @@ function postgresSql(): Sql {
   return postgresClient;
 }
 
+function postgresHost(): string {
+  const url = postgresUrl();
+  if (!url) return "unset";
+  try {
+    return new URL(url).host || "unknown";
+  } catch {
+    return "invalid";
+  }
+}
+
 function postgresExecutor(sql: Sql): Executor {
+  const host = postgresHost();
   return {
     async get(statement, params) {
-      const rows = await sql.unsafe(toDollar(statement), params as never[]);
-      const row = rows[0];
-      return row ? (row as Row) : undefined;
+      try {
+        const rows = await sql.unsafe(toDollar(statement), params as never[]);
+        const row = rows[0];
+        return row ? (row as Row) : undefined;
+      } catch (error) {
+        throw connectionError("postgres", host, error, statement);
+      }
     },
     async run(statement, params) {
-      await sql.unsafe(toDollar(statement), params as never[]);
+      try {
+        await sql.unsafe(toDollar(statement), params as never[]);
+      } catch (error) {
+        throw connectionError("postgres", host, error, statement);
+      }
     },
     async changes(statement, params) {
-      const rows = await sql.unsafe(toDollar(statement), params as never[]);
-      return Number(rows.count ?? 0);
+      try {
+        const rows = await sql.unsafe(toDollar(statement), params as never[]);
+        return Number(rows.count ?? 0);
+      } catch (error) {
+        throw connectionError("postgres", host, error, statement);
+      }
     },
   };
 }
 
-function turso(): Client {
-  if (tursoClient) return tursoClient;
+function tursoExecutor(): Executor {
   const config = tursoConfig();
   if (!config) throw new DatabaseConfigError();
-  tursoClient = createClient({ url: config.url, authToken: config.authToken, intMode: "number" });
-  return tursoClient;
-}
-
-function tursoExecutor(client: Client): Executor {
+  const call = async (statement: string, params: SqlValue[], wantRows: boolean) => {
+    try {
+      return await tursoExecute(config, statement, params, wantRows);
+    } catch (error) {
+      throw connectionError("turso", config.host, error, statement);
+    }
+  };
   return {
     async get(statement, params) {
-      const result = await client.execute({ sql: statement, args: params as InValue[] });
-      const row = result.rows[0];
-      return row ? (row as unknown as Row) : undefined;
+      return (await call(statement, params, true)).row;
     },
     async run(statement, params) {
-      await client.execute({ sql: statement, args: params as InValue[] });
+      await call(statement, params, false);
     },
     async changes(statement, params) {
-      const result = await client.execute({ sql: statement, args: params as InValue[] });
-      return Number(result.rowsAffected ?? 0);
+      return (await call(statement, params, false)).rowsAffected;
     },
   };
 }
@@ -165,7 +189,7 @@ async function current(): Promise<Executor> {
   const kind = databaseKind();
   if (kind === "sqlite") return openSqlite();
   if (kind === "postgres") return postgresExecutor(postgresSql());
-  return tursoExecutor(turso());
+  return tursoExecutor();
 }
 
 const SQLITE_SCHEMA = `

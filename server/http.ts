@@ -320,8 +320,13 @@ async function register(req: IncomingMessage, res: ServerResponse): Promise<void
     const account = await createAccount(name, password);
     writeSessionCookie(res, await openSession(account.id), req);
     send(res, 200, { account });
-  } catch {
-    send(res, 409, { errors: ["That name is already registered."] });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/unique|already exists/i.test(message)) {
+      send(res, 409, { errors: ["That name is already registered."] });
+      return;
+    }
+    throw error;
   }
 }
 

@@ -15,18 +15,18 @@ The app listens on [http://127.0.0.1:47281](http://127.0.0.1:47281). The same pr
 
 ## Deploy on Vercel
 
-Vercel does not keep a SQLite file. The build writes the API as one JavaScript file, `api/[...path].js`, so the serverless function does not load TypeScript. Accounts, sessions, and ledgers are stored in hosted Postgres or Turso.
+Vercel does not keep a SQLite file. The build writes the API as one JavaScript file, `api/[...path].js`, so the serverless function does not load TypeScript. Accounts, sessions, and ledgers are stored in Turso or hosted Postgres.
 
-In the Vercel project, open Storage and create a Postgres database. Vercel sets `POSTGRES_URL`. Redeploy. The live site uses that database.
-
-Turso works the same way. Set both of these environment variables, then redeploy:
+Set both Turso variables, then redeploy. When both are present, the ledger uses Turso even if a Postgres URL is also set. The URL may be `libsql://` or `https://`.
 
 ```bash
 TURSO_DATABASE_URL=libsql://your-database.turso.io
 TURSO_AUTH_TOKEN=your-token
 ```
 
-If neither database is configured, the site says the ledger database is not configured instead of pretending a local file is durable.
+Postgres is the fallback. `POSTGRES_URL_NON_POOLING` is preferred, then `POSTGRES_URL` or `DATABASE_URL`.
+
+A failed connection is written to the Vercel function log and returned in the API body as `errors`, so the ledger screen shows the reason. If neither database is configured, the site says the ledger database is not configured instead of pretending a local file is durable.
 
 ```bash
 npm test
