@@ -3,13 +3,15 @@ import { Link, useSearchParams } from "react-router-dom";
 import { AvailabilityMark, FeaturePanel, PageHeader, Pill, TextInput, useTitle } from "../components/ui.tsx";
 import { useLedger } from "../context/Store.tsx";
 import { availabilityLabel, formatNumber, formatPerThousand, formatDuration, networkLabel } from "../lib/format.ts";
+import { isSampleOffer, withMarketSamples } from "../lib/marketSamples.ts";
 import { filterResources, nameOf } from "../lib/selectors.ts";
 import { NETWORKS, type Availability, type Network } from "../lib/types.ts";
 
 const AVAILABILITY = ["available", "limited", "unavailable"] as const;
 
 export function ResourcesPage() {
-  const { state, scope } = useLedger();
+  const { state: ledger, scope } = useLedger();
+  const state = scope === "examples" ? ledger : withMarketSamples(ledger);
   useTitle("Resources");
   const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState("");
@@ -40,7 +42,7 @@ export function ResourcesPage() {
         lede={
           scope === "examples"
             ? "Example offers, kept apart from the workspace. None of them has an endpoint."
-            : "Offers published in this workspace. A price is what the provider set. Without an endpoint, accepted calls are simulated here. Latency is shown only after a connected endpoint answers."
+            : "Sample offers are marked Sample. Each one lists a provider, a price, a rate limit, and availability. Offers you publish appear in the same list."
         }
       />
       <div className="mt-10 flex flex-col gap-4 border-y border-ink/10 py-5">
@@ -87,7 +89,10 @@ export function ResourcesPage() {
         <div className="mt-12">
           <FeaturePanel>
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <span className="text-[10px] uppercase tracking-[0.16em] text-mute">{featured.endpointConfigured ? "Endpoint connected" : "No endpoint"}</span>
+              <span className="text-[10px] uppercase tracking-[0.16em] text-mute">
+                {isSampleOffer(featured.id) ? "Sample · " : ""}
+                {featured.endpointConfigured ? "Endpoint connected" : "No endpoint"}
+              </span>
               <AvailabilityMark availability={featured.availability} label={availabilityLabel(featured.availability)} />
             </div>
             <h2 className="mt-4 font-serif text-5xl tracking-tight">
@@ -120,6 +125,7 @@ export function ResourcesPage() {
               <p className="text-lg">{resource.name}</p>
               <p className="mt-1 text-xs text-mute">
                 {nameOf(state.providers, resource.providerId)} · {resource.region}
+                {isSampleOffer(resource.id) ? " · Sample" : ""}
               </p>
             </div>
             <p className="text-sm md:col-span-2">{networkLabel(resource.network)}</p>

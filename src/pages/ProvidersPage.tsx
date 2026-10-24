@@ -5,6 +5,7 @@ import { Button, ErrorList, Field, NumberInput, PageHeader, Pill, SectionTitle, 
 import { useLedger } from "../context/Store.tsx";
 import { acceptedOutcome, formatNumber, formatUsd, networkLabel } from "../lib/format.ts";
 import { formatUsdInput, parseUsdToMicro } from "../lib/money.ts";
+import { isSampleProvider, withMarketSamples } from "../lib/marketSamples.ts";
 import { providerRevenueMicro } from "../lib/selectors.ts";
 import { NETWORKS, RPC_METHODS, type Availability, type Network, type Resource, type ResourceDraft, type RpcMethod } from "../lib/types.ts";
 
@@ -77,8 +78,10 @@ export function ProvidersPage() {
 
 export function ProviderPortalPage() {
   const { id } = useParams();
-  const { state, account, scope, setProviderStatus, publishResource, updateResource, approveLease, rejectLease, revokeLease } = useLedger();
+  const { state: ledger, account, scope, setProviderStatus, publishResource, updateResource, approveLease, rejectLease, revokeLease } = useLedger();
+  const state = scope === "examples" ? ledger : withMarketSamples(ledger);
   const provider = state.providers.find((item) => item.id === id);
+  const sampleDesk = isSampleProvider(provider?.id);
   useTitle(provider?.name ?? "Provider");
   const [notice, setNotice] = useState<string[]>([]);
   const [issuedSecret, setIssuedSecret] = useState<string | null>(null);
@@ -111,7 +114,9 @@ export function ProviderPortalPage() {
             {provider.status === "active" ? "Disable provider" : "Enable provider"}
           </Button>
         ) : (
-          <p className="text-sm text-char">This desk is operated by another account.</p>
+          <p className="text-sm text-char">
+            {sampleDesk ? "Sample desk. These offers are listed on the market and are not registered to an account." : "This desk is operated by another account."}
+          </p>
         )}
       </div>
       <ErrorList errors={notice} />

@@ -2,13 +2,16 @@ import { Link, useParams } from "react-router-dom";
 import { AvailabilityMark, useTitle } from "../components/ui.tsx";
 import { useLedger } from "../context/Store.tsx";
 import { availabilityLabel, formatDuration, formatNumber, formatPerThousand, formatUsd, networkLabel } from "../lib/format.ts";
+import { isSampleOffer, withMarketSamples } from "../lib/marketSamples.ts";
 import { costForRequests } from "../lib/money.ts";
 import { measuredLatencyMs, nameOf } from "../lib/selectors.ts";
 
 export function ResourceDetailPage() {
   const { id } = useParams();
-  const { state } = useLedger();
+  const { state: ledger, scope } = useLedger();
+  const state = scope === "examples" ? ledger : withMarketSamples(ledger);
   const resource = state.resources.find((item) => item.id === id);
+  const sample = isSampleOffer(resource?.id);
   useTitle(resource?.name ?? "Resource");
   if (!resource) return <p className="text-sm">That resource is not on the market.</p>;
   const provider = state.providers.find((item) => item.id === resource.providerId);
@@ -25,7 +28,10 @@ export function ResourceDetailPage() {
         Market
       </Link>
       <div className="mt-4 flex flex-wrap items-center gap-4">
-        <span className="text-[10px] uppercase tracking-[0.16em] text-mute">{resource.endpointConfigured ? "Endpoint connected" : "No endpoint"}</span>
+        <span className="text-[10px] uppercase tracking-[0.16em] text-mute">
+          {sample ? "Sample · " : ""}
+          {resource.endpointConfigured ? "Endpoint connected" : "No endpoint"}
+        </span>
         <AvailabilityMark availability={resource.availability} label={availabilityLabel(resource.availability)} />
       </div>
       <h1 className="mt-3 max-w-4xl font-serif text-[clamp(3rem,6vw,5.4rem)] leading-[0.92] tracking-[-0.04em]">{resource.name}</h1>
@@ -44,14 +50,18 @@ export function ResourceDetailPage() {
           <p className="mt-6 max-w-sm text-sm leading-relaxed text-char">
             At this price, 2,500 accepted requests would cost {formatUsd(illustration)}. That is a price illustration, not usage recorded for this offer.
           </p>
-          {closed ? (
+          {sample ? (
+            <p className="mt-6 max-w-sm text-sm leading-relaxed text-char">
+              Sample offer. The provider, price, rate limit, and availability above are listed for the market. It is not registered to an account, so it cannot be leased.
+            </p>
+          ) : closed ? (
             <p className="mt-6 text-sm">This offer cannot be requested while it is withdrawn or the provider is disabled.</p>
           ) : (
             <Link to={`/leases/new?resource=${resource.id}`} className="mt-6 inline-flex rounded-full bg-ink px-4 py-2 text-[13px] tracking-wide text-ivory">
               Request lease
             </Link>
           )}
-          {resource.endpointConfigured ? null : (
+          {sample || resource.endpointConfigured ? null : (
             <p className="mt-6 max-w-sm text-sm leading-relaxed text-char">
               No endpoint is saved. An accepted batch is simulated on this server, labeled as simulated, and metered from the signed price. It is not sent to a provider.
             </p>
