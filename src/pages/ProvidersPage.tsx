@@ -190,7 +190,20 @@ export function ProviderPortalPage() {
 
       <section className="mt-14">
         <SectionTitle title="Leases" />
-        <LeaseTable leases={leases} empty="This provider has no leases." />
+        <LeaseTable
+          leases={leases}
+          empty="This provider has no leases."
+          onApprove={
+            canDecide
+              ? async (leaseId) => {
+                  const result = await approveLease(leaseId, provider.id);
+                  setNotice(result.errors);
+                  if (result.issuedSecret) setIssuedSecret(result.issuedSecret);
+                  return result.errors;
+                }
+              : undefined
+          }
+        />
         {canDecide ? (
           <div className="mt-6 space-y-4">
             {leases
@@ -270,7 +283,7 @@ function Incoming({
       {canManage ? (
         <>
           <div className="mt-4 flex flex-wrap gap-3">
-            <Button onClick={onApprove}>Approve and sign</Button>
+            <Button onClick={onApprove}>Approve</Button>
           </div>
           <div className="mt-4 max-w-lg">
             <Field label="Rejection reason">

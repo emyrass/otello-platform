@@ -2190,27 +2190,30 @@ async function handleApi(req, res) {
   }
   const scope = scopeFrom(url);
   if (method === "GET" && path2 === "/api/workspace") {
-    await withLedger(async () => {
+    const body2 = await withLedger(async () => {
       const state = scope === "examples" ? await readLedger("examples") : await loadLedger("live");
-      send2(res, 200, payload(account, scope, state));
+      return payload(account, scope, state);
     });
+    send2(res, 200, body2);
     return;
   }
   if (method === "POST" && path2 === "/api/examples/open") {
-    await withLedger(async () => {
+    const body2 = await withLedger(async () => {
       const existing = await readLedger("examples");
       const state = existing ?? await createSeedState(Date.now());
       if (!existing) await writeLedger("examples", state);
-      send2(res, 200, payload(account, "examples", await loadLedger("examples")));
+      return payload(account, "examples", await loadLedger("examples"));
     });
+    send2(res, 200, body2);
     return;
   }
   if (method === "POST" && path2 === "/api/examples/reset") {
-    await withLedger(async () => {
+    const body2 = await withLedger(async () => {
       const state = await createSeedState(Date.now());
       await writeLedger("examples", state);
-      send2(res, 200, payload(account, "examples", state));
+      return payload(account, "examples", state);
     });
+    send2(res, 200, body2);
     return;
   }
   const body = method === "GET" ? {} : await readJson(req);
@@ -2286,20 +2289,17 @@ async function handleApi(req, res) {
     const leaseId = decodeURIComponent(leaseAction[1] ?? "");
     const action = leaseAction[2];
     if (method === "GET" && action === "credential") {
-      await withLedger(async () => {
+      const response = await withLedger(async () => {
         const state = await loadLedger(scope);
         const lease = state.leases.find((item) => item.id === leaseId);
         const agent = state.agents.find((item) => item.id === lease?.agentId);
-        if (!lease?.credential || !agent) {
-          send2(res, 404, { errors: ["This lease has no credential."] });
-          return;
-        }
+        if (!lease?.credential || !agent) return { status: 404, body: { errors: ["This lease has no credential."] } };
         if (!canAct(scope, account.id, agent.ownerId)) {
-          send2(res, 403, { errors: ["Only the owner of this agent can read the credential."] });
-          return;
+          return { status: 403, body: { errors: ["Only the owner of this agent can read the credential."] } };
         }
-        send2(res, 200, { secret: lease.credential.secret });
+        return { status: 200, body: { secret: lease.credential.secret } };
       });
+      send2(res, response.status, response.body);
       return;
     }
     if (method === "POST" && action === "approve") {
@@ -2338,7 +2338,7 @@ async function handleApi(req, res) {
     }
   }
   if (method === "POST" && path2 === "/api/rpc") {
-    await withLedger(async () => {
+    const response = await withLedger(async () => {
       const now = Date.now();
       const state = await loadLedger(scope);
       const leaseId = stringField(record, "leaseId");
@@ -2347,15 +2347,13 @@ async function handleApi(req, res) {
       let credentialSecret2 = stringField(record, "credentialSecret");
       if (record.presentHeld === true) {
         if (!lease?.credential || !agent || !canAct(scope, account.id, agent.ownerId)) {
-          send2(res, 403, { ...publicResult(account, scope, state), errors: ["The held credential is available to the agent owner."] });
-          return;
+          return { status: 403, body: { ...publicResult(account, scope, state), errors: ["The held credential is available to the agent owner."] } };
         }
         credentialSecret2 = lease.credential.secret;
       }
       const methodName = stringField(record, "method");
       if (!METHODS2.includes(methodName)) {
-        send2(res, 400, { ...publicResult(account, scope, state), errors: ["Choose a supported RPC method."] });
-        return;
+        return { status: 400, body: { ...publicResult(account, scope, state), errors: ["Choose a supported RPC method."] } };
       }
       const requestCount = numberField(record, "requestCount");
       const outcome = await submitRpc(
@@ -2373,8 +2371,9 @@ async function handleApi(req, res) {
         scope === "examples" ? exampleExecutor : workspaceExecutor
       );
       await writeLedger(scope, outcome.state);
-      send2(res, 200, { ...publicResult(account, scope, outcome.state), result: outcome.result, errors: [] });
+      return { status: 200, body: { ...publicResult(account, scope, outcome.state), result: outcome.result, errors: [] } };
     });
+    send2(res, response.status, response.body);
     return;
   }
   send2(res, 404, { errors: ["That action is not available."] });
@@ -2386,20 +2385,24 @@ function canDecideLease(scope, accountId, ownerId) {
   return canAct(scope, accountId, ownerId) || ownerId === "sample";
 }
 async function mutate(res, account, scope, task) {
-  await withLedger(async () => {
+  const response = await withLedger(async () => {
     const now = Date.now();
     const before = await loadLedger(scope, now);
     const result = await task(before, now);
     if (result.state !== before) await writeLedger(scope, result.state);
     const issued = issuedSecret(before, result.state, account.id, scope);
-    send2(res, result.errors.length > 0 ? 400 : 200, {
-      ...publicResult(account, scope, result.state),
-      errors: result.errors,
-      ...result.leaseId ? { leaseId: result.leaseId } : {},
-      ...result.resourceId ? { resourceId: result.resourceId } : {},
-      ...issued ? { issuedSecret: issued } : {}
-    });
+    return {
+      status: result.errors.length > 0 ? 400 : 200,
+      body: {
+        ...publicResult(account, scope, result.state),
+        errors: result.errors,
+        ...result.leaseId ? { leaseId: result.leaseId } : {},
+        ...result.resourceId ? { resourceId: result.resourceId } : {},
+        ...issued ? { issuedSecret: issued } : {}
+      }
+    };
   });
+  send2(res, response.status, response.body);
 }
 function issuedSecret(before, after, accountId, scope) {
   for (const lease of after.leases) {
@@ -2536,6 +2539,7 @@ async function readJson(req) {
 function send2(res, status, body) {
   res.statusCode = status;
   res.setHeader("content-type", "application/json; charset=utf-8");
+  res.setHeader("cache-control", "no-store");
   res.end(JSON.stringify(body));
 }
 

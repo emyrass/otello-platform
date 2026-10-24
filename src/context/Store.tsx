@@ -64,6 +64,7 @@ export function OtelloProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const scopeRef = useRef<Scope>("live");
   const epoch = useRef(0);
+  const mutations = useRef(0);
 
   const applyEnvelope = useCallback((envelope: Envelope) => {
     if (envelope.account) setAccount(envelope.account);
@@ -79,6 +80,7 @@ export function OtelloProvider({ children }: { children: ReactNode }) {
     const url = scoped ? path : `${path}${path.includes("?") ? "&" : "?"}scope=${scopeRef.current}`;
     const response = await fetch(url, {
       ...init,
+      cache: "no-store",
       credentials: "same-origin",
       headers: {
         ...(init?.body ? { "content-type": "application/json" } : {}),
@@ -100,9 +102,10 @@ export function OtelloProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refresh = useCallback(async () => {
+    if (mutations.current > 0) return;
     const seen = epoch.current;
     const envelope = await request("/api/workspace");
-    if (seen !== epoch.current) return;
+    if (mutations.current > 0 || seen !== epoch.current) return;
     if (envelope.state) {
       setState(envelope.state);
       if (typeof envelope.now === "number") setNow(envelope.now);
@@ -161,13 +164,18 @@ export function OtelloProvider({ children }: { children: ReactNode }) {
 
   const postAction = useCallback(
     async (path: string, body: unknown): Promise<ActionResult> => {
-      const envelope = await request(path, { method: "POST", body: JSON.stringify(body ?? {}) });
-      applyEnvelope(envelope);
-      return {
-        errors: envelope.errors ?? (envelope.status >= 400 ? ["The server did not complete that operation."] : []),
-        issuedSecret: envelope.issuedSecret,
-        leaseId: envelope.leaseId,
-      };
+      mutations.current += 1;
+      try {
+        const envelope = await request(path, { method: "POST", body: JSON.stringify(body ?? {}) });
+        applyEnvelope(envelope);
+        return {
+          errors: envelope.errors ?? (envelope.status >= 400 ? ["The server did not complete that operation."] : []),
+          issuedSecret: envelope.issuedSecret,
+          leaseId: envelope.leaseId,
+        };
+      } finally {
+        mutations.current -= 1;
+      }
     },
     [applyEnvelope, request],
   );
@@ -220,17 +228,22 @@ export function OtelloProvider({ children }: { children: ReactNode }) {
       rejectLease: (leaseId, _providerId, reason) => postAction(`/api/leases/${encodeURIComponent(leaseId)}/reject`, { reason }),
       revokeLease: (leaseId, reason) => postAction(`/api/leases/${encodeURIComponent(leaseId)}/revoke`, { reason }),
       submitRpc: async (input) => {
-        const envelope = await request("/api/rpc", { method: "POST", body: JSON.stringify(input) });
-        applyEnvelope(envelope);
-        return {
-          result: envelope.result ?? {
-            ok: false,
-            reason: envelope.errors?.[0] ?? "The server did not complete that operation.",
-            costMicro: 0,
-            requestCount: input.requestCount,
-            replayed: false,
-          },
-        };
+        mutations.current += 1;
+        try {
+          const envelope = await request("/api/rpc", { method: "POST", body: JSON.stringify(input) });
+          applyEnvelope(envelope);
+          return {
+            result: envelope.result ?? {
+              ok: false,
+              reason: envelope.errors?.[0] ?? "The server did not complete that operation.",
+              costMicro: 0,
+              requestCount: input.requestCount,
+              replayed: false,
+            },
+          };
+        } finally {
+          mutations.current -= 1;
+        }
       },
       recordVerification: (leaseId) => postAction(`/api/leases/${encodeURIComponent(leaseId)}/verify`, {}),
       registerAgent: (name, mandate) => postAction("/api/agents", { name, mandate }),

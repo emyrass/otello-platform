@@ -1,11 +1,20 @@
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useLedger } from "../context/Store.tsx";
 import { formatNumber, formatRemaining, formatUsd, networkLabel, statusLabel } from "../lib/format.ts";
 import { nameOf } from "../lib/selectors.ts";
 import type { Lease } from "../lib/types.ts";
-import { StatusMark } from "./ui.tsx";
+import { Button, StatusMark } from "./ui.tsx";
 
-export function LeaseTable({ leases, empty }: { leases: Lease[]; empty: string }) {
+export function LeaseTable({
+  leases,
+  empty,
+  onApprove,
+}: {
+  leases: Lease[];
+  empty: string;
+  onApprove?: (leaseId: string, providerId: string) => Promise<string[]>;
+}) {
   const { state, now } = useLedger();
   const navigate = useNavigate();
   if (leases.length === 0) return <p className="border-t border-ink/10 py-8 text-sm text-char">{empty}</p>;
@@ -56,12 +65,47 @@ export function LeaseTable({ leases, empty }: { leases: Lease[]; empty: string }
               </td>
               <td className="py-4 pr-4 text-sm tabular-nums">{formatRemaining(lease.expiresAt, now)}</td>
               <td className="py-4">
-                <StatusMark status={lease.status} label={statusLabel(lease.status)} />
+                <div className="flex flex-col items-start gap-2">
+                  <StatusMark status={lease.status} label={statusLabel(lease.status)} />
+                  {lease.status === "requested" && onApprove ? (
+                    <ApproveButton lease={lease} onApprove={onApprove} />
+                  ) : null}
+                  {lease.credential?.status === "valid" ? <p className="text-[11px] text-mute">Credential {lease.credential.id}</p> : null}
+                </div>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function ApproveButton({
+  lease,
+  onApprove,
+}: {
+  lease: Lease;
+  onApprove: (leaseId: string, providerId: string) => Promise<string[]>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div onClick={(event) => event.stopPropagation()}>
+      <Button
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          setError(null);
+          void onApprove(lease.id, lease.providerId)
+            .then((errors) => setError(errors[0] ?? null))
+            .catch(() => setError("The approval did not complete."))
+            .finally(() => setBusy(false));
+        }}
+      >
+        {busy ? "Signing" : "Approve"}
+      </Button>
+      {error ? <p className="mt-2 max-w-[14rem] text-xs text-wine">{error}</p> : null}
     </div>
   );
 }

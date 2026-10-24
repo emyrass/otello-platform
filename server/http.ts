@@ -44,27 +44,30 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
 
   const scope = scopeFrom(url);
   if (method === "GET" && path === "/api/workspace") {
-    await withLedger(async () => {
+    const body = await withLedger(async () => {
       const state = scope === "examples" ? await readLedger("examples") : await loadLedger("live");
-      send(res, 200, payload(account, scope, state));
+      return payload(account, scope, state);
     });
+    send(res, 200, body);
     return;
   }
   if (method === "POST" && path === "/api/examples/open") {
-    await withLedger(async () => {
+    const body = await withLedger(async () => {
       const existing = await readLedger("examples");
       const state = existing ?? (await createSeedState(Date.now()));
       if (!existing) await writeLedger("examples", state);
-      send(res, 200, payload(account, "examples", await loadLedger("examples")));
+      return payload(account, "examples", await loadLedger("examples"));
     });
+    send(res, 200, body);
     return;
   }
   if (method === "POST" && path === "/api/examples/reset") {
-    await withLedger(async () => {
+    const body = await withLedger(async () => {
       const state = await createSeedState(Date.now());
       await writeLedger("examples", state);
-      send(res, 200, payload(account, "examples", state));
+      return payload(account, "examples", state);
     });
+    send(res, 200, body);
     return;
   }
 
@@ -146,20 +149,17 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
     const leaseId = decodeURIComponent(leaseAction[1] ?? "");
     const action = leaseAction[2];
     if (method === "GET" && action === "credential") {
-      await withLedger(async () => {
+      const response = await withLedger(async () => {
         const state = await loadLedger(scope);
         const lease = state.leases.find((item) => item.id === leaseId);
         const agent = state.agents.find((item) => item.id === lease?.agentId);
-        if (!lease?.credential || !agent) {
-          send(res, 404, { errors: ["This lease has no credential."] });
-          return;
-        }
+        if (!lease?.credential || !agent) return { status: 404, body: { errors: ["This lease has no credential."] } };
         if (!canAct(scope, account.id, agent.ownerId)) {
-          send(res, 403, { errors: ["Only the owner of this agent can read the credential."] });
-          return;
+          return { status: 403, body: { errors: ["Only the owner of this agent can read the credential."] } };
         }
-        send(res, 200, { secret: lease.credential.secret });
+        return { status: 200, body: { secret: lease.credential.secret } };
       });
+      send(res, response.status, response.body);
       return;
     }
     if (method === "POST" && action === "approve") {
@@ -199,7 +199,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
   }
 
   if (method === "POST" && path === "/api/rpc") {
-    await withLedger(async () => {
+    const response = await withLedger(async () => {
       const now = Date.now();
       const state = await loadLedger(scope);
       const leaseId = stringField(record, "leaseId");
@@ -208,15 +208,13 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       let credentialSecret = stringField(record, "credentialSecret");
       if (record.presentHeld === true) {
         if (!lease?.credential || !agent || !canAct(scope, account.id, agent.ownerId)) {
-          send(res, 403, { ...publicResult(account, scope, state), errors: ["The held credential is available to the agent owner."] });
-          return;
+          return { status: 403, body: { ...publicResult(account, scope, state), errors: ["The held credential is available to the agent owner."] } };
         }
         credentialSecret = lease.credential.secret;
       }
       const methodName = stringField(record, "method");
       if (!METHODS.includes(methodName as RpcMethod)) {
-        send(res, 400, { ...publicResult(account, scope, state), errors: ["Choose a supported RPC method."] });
-        return;
+        return { status: 400, body: { ...publicResult(account, scope, state), errors: ["Choose a supported RPC method."] } };
       }
       const requestCount = numberField(record, "requestCount");
       const outcome = await submitRpc(
@@ -234,8 +232,9 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
         scope === "examples" ? exampleExecutor : workspaceExecutor,
       );
       await writeLedger(scope, outcome.state);
-      send(res, 200, { ...publicResult(account, scope, outcome.state), result: outcome.result, errors: [] });
+      return { status: 200, body: { ...publicResult(account, scope, outcome.state), result: outcome.result, errors: [] } };
     });
+    send(res, response.status, response.body);
     return;
   }
 
@@ -256,20 +255,24 @@ async function mutate(
   scope: Scope,
   task: (state: AppState, now: number) => MutationResult | Promise<MutationResult>,
 ): Promise<void> {
-  await withLedger(async () => {
+  const response = await withLedger(async () => {
     const now = Date.now();
     const before = await loadLedger(scope, now);
     const result = await task(before, now);
     if (result.state !== before) await writeLedger(scope, result.state);
     const issued = issuedSecret(before, result.state, account.id, scope);
-    send(res, result.errors.length > 0 ? 400 : 200, {
-      ...publicResult(account, scope, result.state),
-      errors: result.errors,
-      ...(result.leaseId ? { leaseId: result.leaseId } : {}),
-      ...(result.resourceId ? { resourceId: result.resourceId } : {}),
-      ...(issued ? { issuedSecret: issued } : {}),
-    });
+    return {
+      status: result.errors.length > 0 ? 400 : 200,
+      body: {
+        ...publicResult(account, scope, result.state),
+        errors: result.errors,
+        ...(result.leaseId ? { leaseId: result.leaseId } : {}),
+        ...(result.resourceId ? { resourceId: result.resourceId } : {}),
+        ...(issued ? { issuedSecret: issued } : {}),
+      },
+    };
   });
+  send(res, response.status, response.body);
 }
 
 function issuedSecret(before: AppState, after: AppState, accountId: string, scope: Scope): string | undefined {
@@ -420,5 +423,6 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
 function send(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
   res.setHeader("content-type", "application/json; charset=utf-8");
+  res.setHeader("cache-control", "no-store");
   res.end(JSON.stringify(body));
 }
