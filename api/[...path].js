@@ -1,5 +1,5 @@
 // server/db.ts
-import { AsyncLocalStorage } from "node:async_hooks";
+import { webcrypto } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { createClient } from "@libsql/client";
@@ -750,16 +750,35 @@ function payloadFromLease(lease, version, createdAt) {
     createdAt
   };
 }
+async function privateKeyCanSign(jwk) {
+  if (!jwk?.d || !jwk.x || !jwk.y) return false;
+  try {
+    await crypto.subtle.importKey("jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
 async function approveLease(state, leaseId, providerId, now) {
   const lease = leaseById(state, leaseId);
   if (!lease) return fail(state, ["No lease matches that identifier."]);
   if (lease.providerId !== providerId) return fail(state, ["Only the offering provider can approve this request."]);
   if (lease.status !== "requested") return fail(state, ["Only a pending request can be approved."]);
   if (now >= lease.expiresAt) return fail(state, ["The requested window has already ended."]);
-  const provider = state.providers.find((item) => item.id === providerId);
+  let provider = state.providers.find((item) => item.id === providerId);
   if (!provider || provider.status !== "active") return fail(state, ["The provider is disabled and cannot sign agreements."]);
-  const privateJwk = state.keystore[providerId];
-  if (!privateJwk) return fail(state, ["This provider has no signing key in the simulation keystore."]);
+  let next = state;
+  let privateJwk = next.keystore[providerId];
+  if (!await privateKeyCanSign(privateJwk)) {
+    const keys = await generateSigningKey();
+    privateJwk = keys.privateJwk;
+    next = {
+      ...next,
+      providers: next.providers.map((item) => item.id === providerId ? { ...item, publicKeyJwk: keys.publicJwk } : item),
+      keystore: { ...next.keystore, [providerId]: keys.privateJwk }
+    };
+    provider = next.providers.find((item) => item.id === providerId) ?? provider;
+  }
   const payload2 = payloadFromLease(lease, 1, now);
   const agreement = await signAgreement({
     privateJwk,
@@ -768,7 +787,7 @@ async function approveLease(state, leaseId, providerId, now) {
     payload: payload2,
     signedAt: now
   });
-  let next = withLease(state, leaseId, (current2) => ({
+  next = withLease(next, leaseId, (current2) => ({
     ...current2,
     status: "approved",
     approvedAt: now,
@@ -1385,13 +1404,15 @@ async function ensureSampleMarket(state) {
 }
 
 // server/db.ts
+if (!globalThis.crypto?.subtle) {
+  Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
+}
 var DatabaseConfigError = class extends Error {
   constructor() {
     super("The ledger database is not configured. In the Vercel project, add Postgres so POSTGRES_URL is set, or set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.");
     this.name = "DatabaseConfigError";
   }
 };
-var storage = new AsyncLocalStorage();
 var sqliteExecutor;
 var postgresClient;
 var tursoClient;
@@ -1427,6 +1448,10 @@ async function openSqlite() {
     },
     async run(statement, params) {
       database.prepare(statement).run(...params);
+    },
+    async changes(statement, params) {
+      const result = database.prepare(statement).run(...params);
+      return Number(result.changes ?? 0);
     }
   };
   return sqliteExecutor;
@@ -1437,7 +1462,7 @@ function postgresSql() {
   if (!url) throw new DatabaseConfigError();
   postgresClient = postgres(url, {
     ssl: url.includes("sslmode=disable") ? false : "require",
-    max: 1,
+    max: 4,
     prepare: false,
     idle_timeout: 20,
     connect_timeout: 15
@@ -1453,6 +1478,10 @@ function postgresExecutor(sql) {
     },
     async run(statement, params) {
       await sql.unsafe(toDollar(statement), params);
+    },
+    async changes(statement, params) {
+      const rows = await sql.unsafe(toDollar(statement), params);
+      return Number(rows.count ?? 0);
     }
   };
 }
@@ -1473,17 +1502,18 @@ function tursoExecutor(client) {
     },
     async run(statement, params) {
       await client.execute({ sql: statement, args: params });
+    },
+    async changes(statement, params) {
+      const result = await client.execute({ sql: statement, args: params });
+      return Number(result.rowsAffected ?? 0);
     }
   };
 }
-async function autocommit() {
+async function current() {
   const kind = databaseKind();
   if (kind === "sqlite") return openSqlite();
   if (kind === "postgres") return postgresExecutor(postgresSql());
   return tursoExecutor(turso());
-}
-async function current() {
-  return storage.getStore() ?? autocommit();
 }
 var SQLITE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS accounts (
@@ -1523,7 +1553,7 @@ var REMOTE_SCHEMA = `
 `;
 function ensureSchema() {
   schemaReady ??= (async () => {
-    const executor = await autocommit();
+    const executor = await current();
     const schema = databaseKind() === "sqlite" ? SQLITE_SCHEMA : REMOTE_SCHEMA;
     for (const statement of schema.split(";").map((part) => part.trim()).filter(Boolean)) {
       await executor.run(statement, []);
@@ -1534,56 +1564,116 @@ function ensureSchema() {
   });
   return schemaReady;
 }
-async function readLedger(scope) {
-  await ensureSchema();
-  const locking = storage.getStore() !== void 0 && databaseKind() === "postgres";
-  const statement = locking ? "SELECT document FROM ledgers WHERE scope = ? FOR UPDATE" : "SELECT document FROM ledgers WHERE scope = ?";
-  const row = await (await current()).get(statement, [scope]);
-  if (!row) return null;
-  const document = row.document;
-  if (typeof document !== "string") return null;
-  return JSON.parse(document);
+function asText(value) {
+  if (typeof value === "string") return value;
+  if (value instanceof Uint8Array) return new TextDecoder().decode(value);
+  return null;
 }
-async function writeLedger(scope, state) {
+function asNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+async function readLedgerRecord(scope) {
   await ensureSchema();
-  await (await current()).run(
-    `INSERT INTO ledgers (scope, document, updated_at) VALUES (?, ?, ?)
-     ON CONFLICT(scope) DO UPDATE SET document = excluded.document, updated_at = excluded.updated_at`,
-    [scope, JSON.stringify(state), Date.now()]
+  const row = await (await current()).get("SELECT document, updated_at FROM ledgers WHERE scope = ?", [scope]);
+  if (!row) return null;
+  const document = asText(row.document);
+  const updatedAt = asNumber(row.updated_at);
+  if (!document || updatedAt === null) return null;
+  return { state: JSON.parse(document), updatedAt };
+}
+async function readLedger(scope) {
+  const record = await readLedgerRecord(scope);
+  return record?.state ?? null;
+}
+async function writeLedger(scope, state, expectedUpdatedAt) {
+  await ensureSchema();
+  const stamp = expectedUpdatedAt == null ? Date.now() : Math.max(Date.now(), expectedUpdatedAt + 1);
+  const document = JSON.stringify(state);
+  const executor = await current();
+  if (expectedUpdatedAt === void 0) {
+    await executor.run(
+      `INSERT INTO ledgers (scope, document, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(scope) DO UPDATE SET document = excluded.document, updated_at = excluded.updated_at`,
+      [scope, document, stamp]
+    );
+    return true;
+  }
+  if (expectedUpdatedAt === null) {
+    const inserted = await executor.changes(
+      `INSERT INTO ledgers (scope, document, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(scope) DO NOTHING`,
+      [scope, document, stamp]
+    );
+    return inserted > 0;
+  }
+  const updated = await executor.changes(
+    "UPDATE ledgers SET document = ?, updated_at = ? WHERE scope = ? AND updated_at = ?",
+    [document, stamp, scope, expectedUpdatedAt]
   );
+  return updated > 0;
 }
 async function loadLedger(scope, now = Date.now()) {
-  const stored = await readLedger(scope) ?? emptyState(now);
-  const seeded = scope === "live" ? await ensureSampleMarket(stored) : stored;
-  const next = reconcile(seeded, now);
-  if (next !== stored || !await readLedger(scope)) await writeLedger(scope, next);
-  return next;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const record = await readLedgerRecord(scope);
+    const base = record?.state ?? emptyState(now);
+    const seeded = scope === "live" ? await ensureSampleMarket(base) : base;
+    const next = reconcile(seeded, now);
+    if (record && next === record.state) return next;
+    const saved = await writeLedger(scope, next, record?.updatedAt ?? null);
+    if (saved) return next;
+  }
+  return await readLedger(scope) ?? emptyState(now);
 }
 var queue = Promise.resolve();
 function withLedger(task) {
   const run = queue.then(async () => {
     await ensureSchema();
-    const kind = databaseKind();
-    if (kind === "sqlite") return task();
-    if (kind === "postgres") {
-      const result = await postgresSql().begin(async (tx2) => storage.run(postgresExecutor(tx2), () => task()));
-      return result;
-    }
-    const tx = await turso().transaction("write");
-    try {
-      const result = await storage.run(tursoExecutor(tx), () => task());
-      await tx.commit();
-      return result;
-    } catch (error) {
-      await tx.rollback();
-      throw error;
-    }
+    return task();
   });
   queue = run.then(
     () => void 0,
     () => void 0
   );
   return run;
+}
+async function commitChange(scope, task) {
+  return withLedger(async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const now = Date.now();
+      const record = await readLedgerRecord(scope);
+      const base = record?.state ?? emptyState(now);
+      const seeded = scope === "live" ? await ensureSampleMarket(base) : base;
+      const prepared = reconcile(seeded, now);
+      const changed = await task(prepared, now);
+      if (record && changed.state === record.state) return { before: prepared, state: prepared, value: changed.value };
+      const saved = await writeLedger(scope, changed.state, record?.updatedAt ?? null);
+      if (!saved) continue;
+      const committed = await readLedger(scope);
+      if (!committed) continue;
+      const leaseId = leaseIdOf(changed.value);
+      if (leaseId) {
+        const wanted = changed.state.leases.find((lease) => lease.id === leaseId);
+        const seen = committed.leases.find((lease) => lease.id === leaseId);
+        if (!wanted || !seen) continue;
+        if (seen.status !== wanted.status) continue;
+        if (Boolean(wanted.agreement) !== Boolean(seen.agreement)) continue;
+        if (Boolean(wanted.credential) !== Boolean(seen.credential)) continue;
+      }
+      return { before: prepared, state: committed, value: changed.value };
+    }
+    throw new Error("The ledger commit did not persist.");
+  });
+}
+function leaseIdOf(value) {
+  if (!value || typeof value !== "object" || !("leaseId" in value)) return void 0;
+  const leaseId = value.leaseId;
+  return typeof leaseId === "string" ? leaseId : void 0;
 }
 async function dbGet(statement, params) {
   await ensureSchema();
@@ -2338,25 +2428,23 @@ async function handleApi(req, res) {
     }
   }
   if (method === "POST" && path2 === "/api/rpc") {
-    const response = await withLedger(async () => {
-      const now = Date.now();
-      const state = await loadLedger(scope);
+    const outcome = await commitChange(scope, async (state, now) => {
       const leaseId = stringField(record, "leaseId");
       const lease = state.leases.find((item) => item.id === leaseId);
       const agent = state.agents.find((item) => item.id === lease?.agentId);
       let credentialSecret2 = stringField(record, "credentialSecret");
       if (record.presentHeld === true) {
         if (!lease?.credential || !agent || !canAct(scope, account.id, agent.ownerId)) {
-          return { status: 403, body: { ...publicResult(account, scope, state), errors: ["The held credential is available to the agent owner."] } };
+          return { state, value: { status: 403, errors: ["The held credential is available to the agent owner."], result: null } };
         }
         credentialSecret2 = lease.credential.secret;
       }
       const methodName = stringField(record, "method");
       if (!METHODS2.includes(methodName)) {
-        return { status: 400, body: { ...publicResult(account, scope, state), errors: ["Choose a supported RPC method."] } };
+        return { state, value: { status: 400, errors: ["Choose a supported RPC method."], result: null } };
       }
       const requestCount = numberField(record, "requestCount");
-      const outcome = await submitRpc(
+      const submitted = await submitRpc(
         state,
         {
           leaseId,
@@ -2370,10 +2458,13 @@ async function handleApi(req, res) {
         now,
         scope === "examples" ? exampleExecutor : workspaceExecutor
       );
-      await writeLedger(scope, outcome.state);
-      return { status: 200, body: { ...publicResult(account, scope, outcome.state), result: outcome.result, errors: [] } };
+      return { state: submitted.state, value: { status: 200, errors: [], result: submitted.result } };
     });
-    send2(res, response.status, response.body);
+    send2(res, outcome.value.status, {
+      ...publicResult(account, scope, outcome.state),
+      errors: outcome.value.errors,
+      ...outcome.value.result ? { result: outcome.value.result } : {}
+    });
     return;
   }
   send2(res, 404, { errors: ["That action is not available."] });
@@ -2385,24 +2476,18 @@ function canDecideLease(scope, accountId, ownerId) {
   return canAct(scope, accountId, ownerId) || ownerId === "sample";
 }
 async function mutate(res, account, scope, task) {
-  const response = await withLedger(async () => {
-    const now = Date.now();
-    const before = await loadLedger(scope, now);
-    const result = await task(before, now);
-    if (result.state !== before) await writeLedger(scope, result.state);
-    const issued = issuedSecret(before, result.state, account.id, scope);
-    return {
-      status: result.errors.length > 0 ? 400 : 200,
-      body: {
-        ...publicResult(account, scope, result.state),
-        errors: result.errors,
-        ...result.leaseId ? { leaseId: result.leaseId } : {},
-        ...result.resourceId ? { resourceId: result.resourceId } : {},
-        ...issued ? { issuedSecret: issued } : {}
-      }
-    };
+  const outcome = await commitChange(scope, async (state, now) => {
+    const result = await task(state, now);
+    return { state: result.state, value: result };
   });
-  send2(res, response.status, response.body);
+  const issued = issuedSecret(outcome.before, outcome.state, account.id, scope);
+  send2(res, outcome.value.errors.length > 0 ? 400 : 200, {
+    ...publicResult(account, scope, outcome.state),
+    errors: outcome.value.errors,
+    ...outcome.value.leaseId ? { leaseId: outcome.value.leaseId } : {},
+    ...outcome.value.resourceId ? { resourceId: outcome.value.resourceId } : {},
+    ...issued ? { issuedSecret: issued } : {}
+  });
 }
 function issuedSecret(before, after, accountId, scope) {
   for (const lease of after.leases) {

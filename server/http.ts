@@ -17,9 +17,9 @@ import {
 } from "../src/lib/engine.ts";
 import { toPublicState } from "../src/lib/publicState.ts";
 import { exampleExecutor } from "../src/lib/rpc.ts";
-import type { AppState, LeaseRequestInput, ResourceDraft, RpcMethod } from "../src/lib/types.ts";
+import type { AppState, LeaseRequestInput, ResourceDraft, RpcMethod, RpcResult } from "../src/lib/types.ts";
 import { accountFromRequest, closeSession, createAccount, findAccountByName, openSession, passwordMatches, readToken, writeSessionCookie, type Account } from "./auth.ts";
-import { loadLedger, readLedger, withLedger, writeLedger, type Scope } from "./db.ts";
+import { commitChange, loadLedger, readLedger, withLedger, writeLedger, type Scope } from "./db.ts";
 import { workspaceExecutor } from "./forward.ts";
 
 const METHODS = ["eth_blockNumber", "eth_getBalance", "eth_getBlockByNumber", "eth_call", "eth_getTransactionReceipt"] as const;
@@ -199,25 +199,23 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
   }
 
   if (method === "POST" && path === "/api/rpc") {
-    const response = await withLedger(async () => {
-      const now = Date.now();
-      const state = await loadLedger(scope);
+    const outcome = await commitChange(scope, async (state, now): Promise<{ state: AppState; value: { status: number; errors: string[]; result: RpcResult | null } }> => {
       const leaseId = stringField(record, "leaseId");
       const lease = state.leases.find((item) => item.id === leaseId);
       const agent = state.agents.find((item) => item.id === lease?.agentId);
       let credentialSecret = stringField(record, "credentialSecret");
       if (record.presentHeld === true) {
         if (!lease?.credential || !agent || !canAct(scope, account.id, agent.ownerId)) {
-          return { status: 403, body: { ...publicResult(account, scope, state), errors: ["The held credential is available to the agent owner."] } };
+          return { state, value: { status: 403, errors: ["The held credential is available to the agent owner."], result: null } };
         }
         credentialSecret = lease.credential.secret;
       }
       const methodName = stringField(record, "method");
       if (!METHODS.includes(methodName as RpcMethod)) {
-        return { status: 400, body: { ...publicResult(account, scope, state), errors: ["Choose a supported RPC method."] } };
+        return { state, value: { status: 400, errors: ["Choose a supported RPC method."], result: null } };
       }
       const requestCount = numberField(record, "requestCount");
-      const outcome = await submitRpc(
+      const submitted = await submitRpc(
         state,
         {
           leaseId,
@@ -231,10 +229,13 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
         now,
         scope === "examples" ? exampleExecutor : workspaceExecutor,
       );
-      await writeLedger(scope, outcome.state);
-      return { status: 200, body: { ...publicResult(account, scope, outcome.state), result: outcome.result, errors: [] } };
+      return { state: submitted.state, value: { status: 200, errors: [] as string[], result: submitted.result } };
     });
-    send(res, response.status, response.body);
+    send(res, outcome.value.status, {
+      ...publicResult(account, scope, outcome.state),
+      errors: outcome.value.errors,
+      ...(outcome.value.result ? { result: outcome.value.result } : {}),
+    });
     return;
   }
 
@@ -255,24 +256,18 @@ async function mutate(
   scope: Scope,
   task: (state: AppState, now: number) => MutationResult | Promise<MutationResult>,
 ): Promise<void> {
-  const response = await withLedger(async () => {
-    const now = Date.now();
-    const before = await loadLedger(scope, now);
-    const result = await task(before, now);
-    if (result.state !== before) await writeLedger(scope, result.state);
-    const issued = issuedSecret(before, result.state, account.id, scope);
-    return {
-      status: result.errors.length > 0 ? 400 : 200,
-      body: {
-        ...publicResult(account, scope, result.state),
-        errors: result.errors,
-        ...(result.leaseId ? { leaseId: result.leaseId } : {}),
-        ...(result.resourceId ? { resourceId: result.resourceId } : {}),
-        ...(issued ? { issuedSecret: issued } : {}),
-      },
-    };
+  const outcome = await commitChange(scope, async (state, now) => {
+    const result = await task(state, now);
+    return { state: result.state, value: result };
   });
-  send(res, response.status, response.body);
+  const issued = issuedSecret(outcome.before, outcome.state, account.id, scope);
+  send(res, outcome.value.errors.length > 0 ? 400 : 200, {
+    ...publicResult(account, scope, outcome.state),
+    errors: outcome.value.errors,
+    ...(outcome.value.leaseId ? { leaseId: outcome.value.leaseId } : {}),
+    ...(outcome.value.resourceId ? { resourceId: outcome.value.resourceId } : {}),
+    ...(issued ? { issuedSecret: issued } : {}),
+  });
 }
 
 function issuedSecret(before: AppState, after: AppState, accountId: string, scope: Scope): string | undefined {

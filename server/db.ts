@@ -1,11 +1,15 @@
-import { AsyncLocalStorage } from "node:async_hooks";
+import { webcrypto } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import { createClient, type Client, type InValue, type Transaction } from "@libsql/client";
-import postgres, { type Sql, type TransactionSql } from "postgres";
+import { createClient, type Client, type InValue } from "@libsql/client";
+import postgres, { type Sql } from "postgres";
 import { emptyState, reconcile } from "../src/lib/engine.ts";
 import { ensureSampleMarket } from "../src/lib/marketSamples.ts";
 import type { AppState } from "../src/lib/types.ts";
+
+if (!globalThis.crypto?.subtle) {
+  Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
+}
 
 export type Scope = "live" | "examples";
 
@@ -22,11 +26,10 @@ type Row = Record<string, unknown>;
 interface Executor {
   get(statement: string, params: SqlValue[]): Promise<Row | undefined>;
   run(statement: string, params: SqlValue[]): Promise<void>;
+  changes(statement: string, params: SqlValue[]): Promise<number>;
 }
 
 type Kind = "sqlite" | "postgres" | "turso";
-
-const storage = new AsyncLocalStorage<Executor>();
 
 let sqliteExecutor: Executor | undefined;
 let postgresClient: Sql | undefined;
@@ -69,6 +72,10 @@ async function openSqlite(): Promise<Executor> {
     async run(statement, params) {
       database.prepare(statement).run(...params);
     },
+    async changes(statement, params) {
+      const result = database.prepare(statement).run(...params) as { changes?: number };
+      return Number(result.changes ?? 0);
+    },
   };
   return sqliteExecutor;
 }
@@ -79,7 +86,7 @@ function postgresSql(): Sql {
   if (!url) throw new DatabaseConfigError();
   postgresClient = postgres(url, {
     ssl: url.includes("sslmode=disable") ? false : "require",
-    max: 1,
+    max: 4,
     prepare: false,
     idle_timeout: 20,
     connect_timeout: 15,
@@ -87,7 +94,7 @@ function postgresSql(): Sql {
   return postgresClient;
 }
 
-function postgresExecutor(sql: Sql | TransactionSql): Executor {
+function postgresExecutor(sql: Sql): Executor {
   return {
     async get(statement, params) {
       const rows = await sql.unsafe(toDollar(statement), params as never[]);
@@ -96,6 +103,10 @@ function postgresExecutor(sql: Sql | TransactionSql): Executor {
     },
     async run(statement, params) {
       await sql.unsafe(toDollar(statement), params as never[]);
+    },
+    async changes(statement, params) {
+      const rows = await sql.unsafe(toDollar(statement), params as never[]);
+      return Number(rows.count ?? 0);
     },
   };
 }
@@ -109,7 +120,7 @@ function turso(): Client {
   return tursoClient;
 }
 
-function tursoExecutor(client: Client | Transaction): Executor {
+function tursoExecutor(client: Client): Executor {
   return {
     async get(statement, params) {
       const result = await client.execute({ sql: statement, args: params as InValue[] });
@@ -119,18 +130,18 @@ function tursoExecutor(client: Client | Transaction): Executor {
     async run(statement, params) {
       await client.execute({ sql: statement, args: params as InValue[] });
     },
+    async changes(statement, params) {
+      const result = await client.execute({ sql: statement, args: params as InValue[] });
+      return Number(result.rowsAffected ?? 0);
+    },
   };
 }
 
-async function autocommit(): Promise<Executor> {
+async function current(): Promise<Executor> {
   const kind = databaseKind();
   if (kind === "sqlite") return openSqlite();
   if (kind === "postgres") return postgresExecutor(postgresSql());
   return tursoExecutor(turso());
-}
-
-async function current(): Promise<Executor> {
-  return storage.getStore() ?? autocommit();
 }
 
 const SQLITE_SCHEMA = `
@@ -173,7 +184,7 @@ const REMOTE_SCHEMA = `
 
 export function ensureSchema(): Promise<void> {
   schemaReady ??= (async () => {
-    const executor = await autocommit();
+    const executor = await current();
     const schema = databaseKind() === "sqlite" ? SQLITE_SCHEMA : REMOTE_SCHEMA;
     for (const statement of schema.split(";").map((part) => part.trim()).filter(Boolean)) {
       await executor.run(statement, []);
@@ -185,34 +196,82 @@ export function ensureSchema(): Promise<void> {
   return schemaReady;
 }
 
-export async function readLedger(scope: Scope): Promise<AppState | null> {
-  await ensureSchema();
-  const locking = storage.getStore() !== undefined && databaseKind() === "postgres";
-  const statement = locking
-    ? "SELECT document FROM ledgers WHERE scope = ? FOR UPDATE"
-    : "SELECT document FROM ledgers WHERE scope = ?";
-  const row = await (await current()).get(statement, [scope]);
-  if (!row) return null;
-  const document = row.document;
-  if (typeof document !== "string") return null;
-  return JSON.parse(document) as AppState;
+function asText(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (value instanceof Uint8Array) return new TextDecoder().decode(value);
+  return null;
 }
 
-export async function writeLedger(scope: Scope, state: AppState): Promise<void> {
+function asNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+interface LedgerRecord {
+  state: AppState;
+  updatedAt: number;
+}
+
+export async function readLedgerRecord(scope: Scope): Promise<LedgerRecord | null> {
   await ensureSchema();
-  await (await current()).run(
-    `INSERT INTO ledgers (scope, document, updated_at) VALUES (?, ?, ?)
-     ON CONFLICT(scope) DO UPDATE SET document = excluded.document, updated_at = excluded.updated_at`,
-    [scope, JSON.stringify(state), Date.now()],
+  const row = await (await current()).get("SELECT document, updated_at FROM ledgers WHERE scope = ?", [scope]);
+  if (!row) return null;
+  const document = asText(row.document);
+  const updatedAt = asNumber(row.updated_at);
+  if (!document || updatedAt === null) return null;
+  return { state: JSON.parse(document) as AppState, updatedAt };
+}
+
+export async function readLedger(scope: Scope): Promise<AppState | null> {
+  const record = await readLedgerRecord(scope);
+  return record?.state ?? null;
+}
+
+/** Writes the ledger. When `expectedUpdatedAt` is set, the write commits only if that stamp is still current. */
+export async function writeLedger(scope: Scope, state: AppState, expectedUpdatedAt?: number | null): Promise<boolean> {
+  await ensureSchema();
+  const stamp = expectedUpdatedAt == null ? Date.now() : Math.max(Date.now(), expectedUpdatedAt + 1);
+  const document = JSON.stringify(state);
+  const executor = await current();
+  if (expectedUpdatedAt === undefined) {
+    await executor.run(
+      `INSERT INTO ledgers (scope, document, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(scope) DO UPDATE SET document = excluded.document, updated_at = excluded.updated_at`,
+      [scope, document, stamp],
+    );
+    return true;
+  }
+  if (expectedUpdatedAt === null) {
+    const inserted = await executor.changes(
+      `INSERT INTO ledgers (scope, document, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(scope) DO NOTHING`,
+      [scope, document, stamp],
+    );
+    return inserted > 0;
+  }
+  const updated = await executor.changes(
+    "UPDATE ledgers SET document = ?, updated_at = ? WHERE scope = ? AND updated_at = ?",
+    [document, stamp, scope, expectedUpdatedAt],
   );
+  return updated > 0;
 }
 
 export async function loadLedger(scope: Scope, now = Date.now()): Promise<AppState> {
-  const stored = (await readLedger(scope)) ?? emptyState(now);
-  const seeded = scope === "live" ? await ensureSampleMarket(stored) : stored;
-  const next = reconcile(seeded, now);
-  if (next !== stored || !(await readLedger(scope))) await writeLedger(scope, next);
-  return next;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const record = await readLedgerRecord(scope);
+    const base = record?.state ?? emptyState(now);
+    const seeded = scope === "live" ? await ensureSampleMarket(base) : base;
+    const next = reconcile(seeded, now);
+    if (record && next === record.state) return next;
+    const saved = await writeLedger(scope, next, record?.updatedAt ?? null);
+    if (saved) return next;
+  }
+  return (await readLedger(scope)) ?? emptyState(now);
 }
 
 let queue: Promise<void> = Promise.resolve();
@@ -220,27 +279,55 @@ let queue: Promise<void> = Promise.resolve();
 export function withLedger<T>(task: () => Promise<T> | T): Promise<T> {
   const run = queue.then(async () => {
     await ensureSchema();
-    const kind = databaseKind();
-    if (kind === "sqlite") return task();
-    if (kind === "postgres") {
-      const result = await postgresSql().begin(async (tx) => storage.run(postgresExecutor(tx), () => task()));
-      return result as T;
-    }
-    const tx = await turso().transaction("write");
-    try {
-      const result = await storage.run(tursoExecutor(tx), () => task());
-      await tx.commit();
-      return result;
-    } catch (error) {
-      await tx.rollback();
-      throw error;
-    }
+    return task();
   });
   queue = run.then(
     () => undefined,
     () => undefined,
   );
   return run;
+}
+
+/**
+ * Applies a change and returns only after a committed read matches it.
+ * Remote databases autocommit each statement, so the write is durable before this resolves.
+ */
+export async function commitChange<T>(
+  scope: Scope,
+  task: (state: AppState, now: number) => Promise<{ state: AppState; value: T }>,
+): Promise<{ before: AppState; state: AppState; value: T }> {
+  return withLedger(async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const now = Date.now();
+      const record = await readLedgerRecord(scope);
+      const base = record?.state ?? emptyState(now);
+      const seeded = scope === "live" ? await ensureSampleMarket(base) : base;
+      const prepared = reconcile(seeded, now);
+      const changed = await task(prepared, now);
+      if (record && changed.state === record.state) return { before: prepared, state: prepared, value: changed.value };
+      const saved = await writeLedger(scope, changed.state, record?.updatedAt ?? null);
+      if (!saved) continue;
+      const committed = await readLedger(scope);
+      if (!committed) continue;
+      const leaseId = leaseIdOf(changed.value);
+      if (leaseId) {
+        const wanted = changed.state.leases.find((lease) => lease.id === leaseId);
+        const seen = committed.leases.find((lease) => lease.id === leaseId);
+        if (!wanted || !seen) continue;
+        if (seen.status !== wanted.status) continue;
+        if (Boolean(wanted.agreement) !== Boolean(seen.agreement)) continue;
+        if (Boolean(wanted.credential) !== Boolean(seen.credential)) continue;
+      }
+      return { before: prepared, state: committed, value: changed.value };
+    }
+    throw new Error("The ledger commit did not persist.");
+  });
+}
+
+function leaseIdOf(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || !("leaseId" in value)) return undefined;
+  const leaseId = (value as { leaseId?: unknown }).leaseId;
+  return typeof leaseId === "string" ? leaseId : undefined;
 }
 
 let maintenanceStarted = false;

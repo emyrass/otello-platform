@@ -134,6 +134,26 @@ describe("money", () => {
 });
 
 describe("agreements", () => {
+  it("replaces a broken signing key, activates the lease, and issues a credential", async () => {
+    const base = await world();
+    const broken: AppState = {
+      ...base.state,
+      providers: base.state.providers.map((provider) =>
+        provider.id === base.provider.id ? { ...provider, publicKeyJwk: { kty: "EC", crv: "P-256" } } : provider,
+      ),
+      keystore: { ...base.state.keystore, [base.provider.id]: { kty: "EC", crv: "P-256" } },
+    };
+    const requested = requestLease(broken, requestInput(), NOW);
+    expect(requested.errors).toEqual([]);
+    const approved = await approveLease(requested.state, requested.leaseId!, base.provider.id, NOW);
+    expect(approved.errors).toEqual([]);
+    const lease = approved.state.leases[0]!;
+    expect(lease.status).toBe("active");
+    expect(lease.credential?.status).toBe("valid");
+    expect(lease.credential?.secret.startsWith("otl_")).toBe(true);
+    expect(await verifyAgreement(lease.agreement)).toBe(true);
+  });
+
   it("signs and verifies, then fails when a signed term changes", async () => {
     const opened = await activeLease();
     const agreement = opened.state.leases[0]!.agreement!;

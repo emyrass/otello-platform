@@ -176,12 +176,14 @@ export function ProviderPortalPage() {
               key={lease.id}
               leaseId={lease.id}
               canManage={canDecide}
-              onApprove={() =>
-                void approveLease(lease.id, provider.id).then((result) => {
-                  setNotice(result.errors);
-                  if (result.issuedSecret) setIssuedSecret(result.issuedSecret);
-                })
-              }
+              onApprove={() => {
+                void approveLease(lease.id, provider.id)
+                  .then((result) => {
+                    setNotice(result.errors);
+                    if (result.issuedSecret) setIssuedSecret(result.issuedSecret);
+                  })
+                  .catch((error: unknown) => setNotice([error instanceof Error ? error.message : "The approval did not complete."]));
+              }}
               onReject={(reason) => void rejectLease(lease.id, provider.id, reason).then((result) => setNotice(result.errors))}
             />
           ))}

@@ -94,12 +94,13 @@ function ApproveButton({
     <div onClick={(event) => event.stopPropagation()}>
       <Button
         disabled={busy}
-        onClick={() => {
+        onClick={(event) => {
+          event.stopPropagation();
           setBusy(true);
           setError(null);
           void onApprove(lease.id, lease.providerId)
             .then((errors) => setError(errors[0] ?? null))
-            .catch(() => setError("The approval did not complete."))
+            .catch((error: unknown) => setError(error instanceof Error ? error.message : "The approval did not complete."))
             .finally(() => setBusy(false));
         }}
       >

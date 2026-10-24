@@ -78,21 +78,26 @@ export function OtelloProvider({ children }: { children: ReactNode }) {
   const request = useCallback(async (path: string, init?: RequestInit): Promise<Envelope & { status: number }> => {
     const scoped = path.startsWith("/api/register") || path.startsWith("/api/login") || path.startsWith("/api/logout") || path.startsWith("/api/session");
     const url = scoped ? path : `${path}${path.includes("?") ? "&" : "?"}scope=${scopeRef.current}`;
-    const response = await fetch(url, {
-      ...init,
-      cache: "no-store",
-      credentials: "same-origin",
-      headers: {
-        ...(init?.body ? { "content-type": "application/json" } : {}),
-        ...init?.headers,
-      },
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        ...init,
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: {
+          ...(init?.body ? { "content-type": "application/json" } : {}),
+          ...init?.headers,
+        },
+      });
+    } catch {
+      return { errors: ["The ledger could not be reached."], status: 503 };
+    }
     const text = await response.text();
     let envelope: Envelope;
     try {
       envelope = text ? (JSON.parse(text) as Envelope) : {};
     } catch {
-      throw new Error("The ledger is not available from this deployment.");
+      return { errors: ["The ledger is not available from this deployment."], status: response.status || 502 };
     }
     if (response.status === 401) {
       setAccount(null);

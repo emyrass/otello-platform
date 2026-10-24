@@ -47,6 +47,31 @@ describe("ledger database", () => {
     expect(read?.agents.map((agent) => agent.id)).toEqual(["agt_test"]);
   });
 
+  it("does not let a stale ledger write overwrite a committed approval", async () => {
+    const { readLedger, readLedgerRecord, writeLedger } = await import("./db.ts");
+    const { emptyState } = await import("../src/lib/engine.ts");
+    const now = Date.UTC(2026, 9, 24);
+    const original = emptyState(now);
+    await writeLedger("live", original);
+    const current = await readLedgerRecord("live");
+    expect(current?.updatedAt).toEqual(expect.any(Number));
+    const newer = emptyState(now + 1);
+    newer.agents.push({
+      id: "agt_saved",
+      ownerId: "acct_test",
+      name: "Saved",
+      mandate: "Stay approved.",
+      status: "active",
+      createdAt: now,
+    });
+    await writeLedger("live", newer, current!.updatedAt);
+    const stale = emptyState(now);
+    const overwritten = await writeLedger("live", stale, current!.updatedAt);
+    expect(overwritten).toBe(false);
+    const saved = await readLedger("live");
+    expect(saved?.agents.map((agent) => agent.id)).toEqual(["agt_saved"]);
+  });
+
   it("refuses Vercel when no hosted database is configured", async () => {
     const previous = process.env.OTELLO_SQLITE_PATH;
     delete process.env.OTELLO_SQLITE_PATH;

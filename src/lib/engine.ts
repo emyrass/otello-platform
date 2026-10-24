@@ -254,16 +254,36 @@ function payloadFromLease(lease: Lease, version: number, createdAt: number): Agr
   };
 }
 
+async function privateKeyCanSign(jwk: JsonWebKey | undefined): Promise<boolean> {
+  if (!jwk?.d || !jwk.x || !jwk.y) return false;
+  try {
+    await crypto.subtle.importKey("jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function approveLease(state: AppState, leaseId: string, providerId: string, now: number): Promise<MutationResult> {
   const lease = leaseById(state, leaseId);
   if (!lease) return fail(state, ["No lease matches that identifier."]);
   if (lease.providerId !== providerId) return fail(state, ["Only the offering provider can approve this request."]);
   if (lease.status !== "requested") return fail(state, ["Only a pending request can be approved."]);
   if (now >= lease.expiresAt) return fail(state, ["The requested window has already ended."]);
-  const provider = state.providers.find((item) => item.id === providerId);
+  let provider = state.providers.find((item) => item.id === providerId);
   if (!provider || provider.status !== "active") return fail(state, ["The provider is disabled and cannot sign agreements."]);
-  const privateJwk = state.keystore[providerId];
-  if (!privateJwk) return fail(state, ["This provider has no signing key in the simulation keystore."]);
+  let next = state;
+  let privateJwk = next.keystore[providerId];
+  if (!(await privateKeyCanSign(privateJwk))) {
+    const keys = await generateSigningKey();
+    privateJwk = keys.privateJwk;
+    next = {
+      ...next,
+      providers: next.providers.map((item) => (item.id === providerId ? { ...item, publicKeyJwk: keys.publicJwk } : item)),
+      keystore: { ...next.keystore, [providerId]: keys.privateJwk },
+    };
+    provider = next.providers.find((item) => item.id === providerId) ?? provider;
+  }
 
   const payload = payloadFromLease(lease, 1, now);
   const agreement = await signAgreement({
@@ -273,7 +293,7 @@ export async function approveLease(state: AppState, leaseId: string, providerId:
     payload,
     signedAt: now,
   });
-  let next = withLease(state, leaseId, (current) => ({
+  next = withLease(next, leaseId, (current) => ({
     ...current,
     status: "approved",
     approvedAt: now,
