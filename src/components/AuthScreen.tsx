@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useOtello } from "../context/Store.tsx";
+import { ContractAddress } from "./ContractAddress.tsx";
 import { Button, ErrorList, Field, TextInput } from "./ui.tsx";
 
 export function AuthScreen() {
@@ -49,6 +50,9 @@ export function AuthScreen() {
       >
         {mode === "enter" ? "Create an account" : "I already have an account"}
       </button>
+      <div className="mt-12">
+        <ContractAddress />
+      </div>
     </main>
   );
 }

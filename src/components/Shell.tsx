@@ -4,6 +4,7 @@ import { useOtello } from "../context/Store.tsx";
 import { cn } from "../lib/cn.ts";
 import { EXAMPLE_NOTICE, WORKSPACE_NOTICE } from "../lib/types.ts";
 import { AuthScreen } from "./AuthScreen.tsx";
+import { ContractAddress } from "./ContractAddress.tsx";
 import { Button } from "./ui.tsx";
 
 const LINKS = [
@@ -30,6 +31,9 @@ export function Shell() {
       <main className="mx-auto max-w-xl px-6 py-24">
         <p className="font-serif text-6xl tracking-tight">otello</p>
         <p className="mt-4 text-sm text-char">Opening the ledger.</p>
+        <div className="mt-10">
+          <ContractAddress />
+        </div>
       </main>
     );
   }
@@ -39,6 +43,9 @@ export function Shell() {
       <main className="mx-auto max-w-xl px-6 py-24">
         <p className="font-serif text-5xl">The ledger did not open.</p>
         <p className="mt-4 text-sm text-char">{error}</p>
+        <div className="mt-10">
+          <ContractAddress />
+        </div>
       </main>
     );
   }
@@ -49,6 +56,9 @@ export function Shell() {
     return (
       <main className="mx-auto max-w-xl px-6 py-24">
         <p className="font-serif text-5xl tracking-tight">Opening the ledger.</p>
+        <div className="mt-10">
+          <ContractAddress />
+        </div>
       </main>
     );
   }
@@ -118,7 +128,10 @@ export function Shell() {
             </button>
           </div>
           <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
-            <p className="max-w-3xl text-xs leading-relaxed text-char">{scope === "examples" ? EXAMPLE_NOTICE : WORKSPACE_NOTICE}</p>
+            <div className="flex max-w-3xl flex-col gap-4">
+              <ContractAddress />
+              <p className="text-xs leading-relaxed text-char">{scope === "examples" ? EXAMPLE_NOTICE : WORKSPACE_NOTICE}</p>
+            </div>
             {scope === "examples" ? (
               <Button variant="line" onClick={() => dialogRef.current?.showModal()}>
                 Reset examples
