@@ -15,7 +15,7 @@ The app listens on [http://127.0.0.1:47281](http://127.0.0.1:47281). The same pr
 
 ## Deploy on Vercel
 
-Vercel does not keep a SQLite file. The build writes the ledger function to `api/index.js` and to `api/[...path].js`, because the Vercel build opens that previous path directly. Each ledger route also has its own file under `api/`, and any other `/api/...` path is rewritten to the same function. Accounts, sessions, and ledgers are stored in Turso or hosted Postgres.
+Vercel does not keep a SQLite file. The build writes one serverless function, `api/index.js`. Every `/api/...` request is rewritten to that function, which restores the original path before it opens the ledger. The Hobby plan allows 12 functions, so the API stays a single file. Accounts, sessions, and ledgers are stored in Turso or hosted Postgres.
 
 Set both Turso variables, then redeploy. When both are present, the ledger uses Turso even if a Postgres URL is also set. The URL may be `libsql://` or `https://`.
 
