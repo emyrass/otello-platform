@@ -2,7 +2,7 @@
 import { webcrypto } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import { createClient } from "@libsql/client";
+import { createClient } from "@libsql/client/http";
 import postgres from "postgres";
 
 // src/lib/hash.ts
@@ -1418,14 +1418,27 @@ var postgresClient;
 var tursoClient;
 var schemaReady;
 function databaseKind() {
-  if (process.env.OTELLO_SQLITE_PATH) return "sqlite";
+  if (process.env.OTELLO_SQLITE_PATH && !hosted()) return "sqlite";
   if (postgresUrl()) return "postgres";
-  if (process.env.TURSO_DATABASE_URL && process.env.TURSO_AUTH_TOKEN) return "turso";
-  if (process.env.VERCEL) throw new DatabaseConfigError();
+  if (tursoConfig()) return "turso";
+  if (hosted()) throw new DatabaseConfigError();
   return "sqlite";
 }
+function hosted() {
+  return Boolean(process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME);
+}
+function envValue(name) {
+  const value = process.env[name]?.trim();
+  return value ? value : void 0;
+}
 function postgresUrl() {
-  return process.env.POSTGRES_URL || process.env.DATABASE_URL || process.env.POSTGRES_PRISMA_URL || void 0;
+  return envValue("POSTGRES_URL_NON_POOLING") || envValue("DATABASE_URL_UNPOOLED") || envValue("POSTGRES_URL") || envValue("DATABASE_URL") || envValue("POSTGRES_PRISMA_URL");
+}
+function tursoConfig() {
+  const url = envValue("TURSO_DATABASE_URL");
+  const authToken = envValue("TURSO_AUTH_TOKEN");
+  if (!url || !authToken) return void 0;
+  return { url, authToken };
 }
 function toDollar(statement) {
   let index = 0;
@@ -1460,12 +1473,15 @@ function postgresSql() {
   if (postgresClient) return postgresClient;
   const url = postgresUrl();
   if (!url) throw new DatabaseConfigError();
+  const pooled = /pooler|pgbouncer/i.test(url);
   postgresClient = postgres(url, {
     ssl: url.includes("sslmode=disable") ? false : "require",
-    max: 4,
+    max: 1,
     prepare: false,
-    idle_timeout: 20,
-    connect_timeout: 15
+    fetch_types: false,
+    idle_timeout: pooled ? 0 : 20,
+    connect_timeout: 10,
+    max_lifetime: 60 * 5
   });
   return postgresClient;
 }
@@ -1487,10 +1503,9 @@ function postgresExecutor(sql) {
 }
 function turso() {
   if (tursoClient) return tursoClient;
-  const url = process.env.TURSO_DATABASE_URL;
-  const authToken = process.env.TURSO_AUTH_TOKEN;
-  if (!url || !authToken) throw new DatabaseConfigError();
-  tursoClient = createClient({ url, authToken });
+  const config2 = tursoConfig();
+  if (!config2) throw new DatabaseConfigError();
+  tursoClient = createClient({ url: config2.url, authToken: config2.authToken, intMode: "number" });
   return tursoClient;
 }
 function tursoExecutor(client) {

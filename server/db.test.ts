@@ -72,6 +72,31 @@ describe("ledger database", () => {
     expect(saved?.agents.map((agent) => agent.id)).toEqual(["agt_saved"]);
   });
 
+  it("selects Turso or Postgres on Vercel and does not open a local file", async () => {
+    const keys = ["OTELLO_SQLITE_PATH", "VERCEL", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN", "POSTGRES_URL", "POSTGRES_URL_NON_POOLING", "DATABASE_URL", "DATABASE_URL_UNPOOLED", "POSTGRES_PRISMA_URL"] as const;
+    const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    try {
+      for (const key of keys) delete process.env[key];
+      process.env.VERCEL = "1";
+      process.env.TURSO_DATABASE_URL = "libsql://example.turso.io";
+      process.env.TURSO_AUTH_TOKEN = "token";
+      const { databaseKind, DatabaseConfigError } = await import("./db.ts");
+      expect(databaseKind()).toBe("turso");
+      process.env.POSTGRES_URL_NON_POOLING = "postgres://direct.example/otello";
+      expect(databaseKind()).toBe("postgres");
+      delete process.env.POSTGRES_URL_NON_POOLING;
+      delete process.env.TURSO_DATABASE_URL;
+      delete process.env.TURSO_AUTH_TOKEN;
+      expect(() => databaseKind()).toThrow(DatabaseConfigError);
+    } finally {
+      for (const key of keys) {
+        const value = previous[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it("refuses Vercel when no hosted database is configured", async () => {
     const previous = process.env.OTELLO_SQLITE_PATH;
     delete process.env.OTELLO_SQLITE_PATH;
